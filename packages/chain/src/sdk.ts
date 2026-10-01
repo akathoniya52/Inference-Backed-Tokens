@@ -37,6 +37,7 @@
 import { NATIVE_MINT } from '@solana/spl-token';
 import { PublicKey } from '@solana/web3.js';
 import {
+  convertToLamports as sdkConvertToLamports,
   DAMM_V2_MIGRATION_FEE_ADDRESS,
   MigrationFeeOption,
 } from '@meteora-ag/dynamic-bonding-curve-sdk';
@@ -78,7 +79,17 @@ export type {
   SwapQuote2Result,
   VirtualPool,
 } from '@meteora-ag/dynamic-bonding-curve-sdk';
-export { CP_AMM_PROGRAM_ID, CpAmm, derivePoolAddress } from '@meteora-ag/cp-amm-sdk';
+export {
+  CP_AMM_PROGRAM_ID,
+  CpAmm,
+  derivePoolAddress,
+  derivePositionAddress,
+  derivePositionNftAccount,
+  getCurrentPoint as getDammCurrentPoint,
+  getTokenProgram,
+  SwapMode as DammSwapMode,
+} from '@meteora-ag/cp-amm-sdk';
+export type { PoolState as DammPoolState } from '@meteora-ag/cp-amm-sdk';
 export { NATIVE_MINT };
 
 // TODO(P2-T8): move the address constants below to @ibt/shared.
@@ -100,3 +111,7 @@ if (!dammV2Config100Bps) {
 }
 /** DAMM v2 fee config for the 100 bps fixed option (`Hv8Lmz…cjp`), the `dammConfig` for migration. */
 export const DAMM_V2_CONFIG_100_BPS: PublicKey = dammV2Config100Bps;
+
+/** bn.js is not a direct dependency; the SDK's `convertToLamports(x, 0)` builds a BN from an integer. */
+export type BNValue = ReturnType<typeof sdkConvertToLamports>;
+export const toBN = (value: bigint): BNValue => sdkConvertToLamports(value.toString(), 0);

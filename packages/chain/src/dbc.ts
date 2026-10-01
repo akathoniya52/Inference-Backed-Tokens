@@ -2,13 +2,13 @@ import { AppError } from '@ibt/shared';
 import type { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
 
 import {
-  convertToLamports,
   DAMM_V2_CONFIG_100_BPS,
   deriveDbcPoolAddress,
   DynamicBondingCurveClient,
   getCurrentPoint,
   NATIVE_MINT,
   SwapMode,
+  toBN,
 } from './sdk.js';
 
 interface Integer {
@@ -62,9 +62,6 @@ export interface MigrateTx {
 
 const PROGRESS_SCALE = 1_000_000n;
 
-export type BNValue = ReturnType<typeof convertToLamports>;
-
-export const toBN = (value: bigint): BNValue => convertToLamports(value.toString(), 0);
 const big = (value: Integer) => BigInt(value.toString());
 const dbc = (connection: Connection) => new DynamicBondingCurveClient(connection, 'confirmed');
 

@@ -15,6 +15,7 @@ import { requestId } from './middleware/requestId.js';
 import { authRouter } from './modules/auth/router.js';
 import { gatewayRouter } from './modules/gateway/router.js';
 import { keysRouter } from './modules/keys/router.js';
+import { modelsRouter } from './modules/models/router.js';
 
 export interface AppTimeouts {
   /** Upstream first byte (L238); the gateway (P4) reads it. */
@@ -108,6 +109,7 @@ export function createApp(deps: AppDeps): Express {
 
   app.use('/api/auth', authRouter(ctx));
   app.use('/api/keys', keysRouter(ctx));
+  app.use('/api/models', modelsRouter(ctx));
   app.use('/v1', gatewayRouter(ctx));
 
   deps.extraRoutes?.(app, ctx);

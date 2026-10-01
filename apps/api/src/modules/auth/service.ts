@@ -17,6 +17,7 @@ import nacl from 'tweetnacl';
 import type { AppContext } from '../../app.js';
 import type { AuthUser } from '../../context.js';
 import { base58Decode } from '../../lib/base58.js';
+import { isDuplicateKey } from '../../lib/mongoErrors.js';
 
 const JWT_ALG = 'HS256';
 const UPSERT_ATTEMPTS = 3;
@@ -27,10 +28,6 @@ function signInDomain(ctx: AppContext): string {
 
 function jwtKey(ctx: AppContext): Uint8Array {
   return new TextEncoder().encode(ctx.env.JWT_SECRET);
-}
-
-function isDuplicateKey(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && 'code' in err && err.code === 11000;
 }
 
 /** Issues a single-use nonce valid for 5 minutes (L223, L518). */

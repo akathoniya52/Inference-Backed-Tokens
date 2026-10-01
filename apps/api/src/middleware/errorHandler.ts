@@ -1,10 +1,8 @@
 import { AppError, isAppError } from '@ibt/shared';
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 import type { Logger } from 'pino';
-import { z } from 'zod';
 
 import { getRequestId } from '../context.js';
-import { describeZodError } from '../validate.js';
 
 interface HttpParserError {
   type: string;
@@ -22,11 +20,10 @@ function isParserError(err: unknown): err is HttpParserError {
   );
 }
 
+// Request input is validated with `parseInput`, which throws a 400 AppError.
+// A bare ZodError here comes from a response DTO or internal parse: a 500.
 function toAppError(err: unknown): AppError {
   if (isAppError(err)) return err;
-  if (err instanceof z.ZodError) {
-    return new AppError('invalid_request', { message: describeZodError(err), cause: err });
-  }
   if (isParserError(err) && err.status >= 400 && err.status < 500) {
     const message =
       err.type === 'entity.too.large' ? 'request body exceeds 1 MB' : 'request body is invalid';

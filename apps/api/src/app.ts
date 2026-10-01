@@ -12,6 +12,7 @@ import { getAuthUser, getRequestId, type Clock } from './context.js';
 import type { ApiEnv } from './env.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { requestId } from './middleware/requestId.js';
+import { authRouter } from './modules/auth/router.js';
 
 export interface AppTimeouts {
   /** Upstream first byte (L238); the gateway (P4) reads it. */
@@ -27,7 +28,7 @@ export interface AppDeps {
   timeouts?: AppTimeouts;
   logger?: Logger;
   /** Mounted after the built-in routes and before the 404 handler (tests). */
-  extraRoutes?: (app: Express) => void;
+  extraRoutes?: (app: Express, ctx: AppContext) => void;
 }
 
 /** Fully resolved dependencies handed to every module router. */
@@ -103,7 +104,9 @@ export function createApp(deps: AppDeps): Express {
     res.status(ok ? 200 : 503).json({ ok, mongo, chain: chainOk });
   });
 
-  deps.extraRoutes?.(app);
+  app.use('/api/auth', authRouter(ctx));
+
+  deps.extraRoutes?.(app, ctx);
 
   app.use(notFound());
   app.use(errorHandler(logger));

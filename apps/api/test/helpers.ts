@@ -2,13 +2,21 @@ import { randomBytes } from 'node:crypto';
 
 import { createFakeChain, type FakeChain } from '@ibt/chain/testing';
 import { connection, connectDb, disconnectDb, mongoose, syncAllIndexes } from '@ibt/db';
-import { ErrorEnvelopeSchema, type ErrorEnvelope } from '@ibt/shared';
+import {
+  ErrorEnvelopeSchema,
+  NonceResponseSchema,
+  VerifyResponseSchema,
+  type ErrorEnvelope,
+} from '@ibt/shared';
 import type { AlertLevel, Alerter } from '@ibt/shared/node';
 import type { Express } from 'express';
+import request from 'supertest';
+import nacl from 'tweetnacl';
 import { inject } from 'vitest';
 
 import { createApp, type AppDeps } from '../src/app.js';
 import { loadEnv, type ApiEnv } from '../src/env.js';
+import { base58Encode } from '../src/lib/base58.js';
 
 const WALLET = '11111111111111111111111111111111';
 
@@ -140,4 +148,52 @@ export async function makeTestApp(opts: MakeTestAppOptions = {}): Promise<TestAp
 /** The `error` object of an envelope response, validated. */
 export function errorOf(res: { body: unknown }): ErrorEnvelope['error'] {
   return ErrorEnvelopeSchema.parse(res.body).error;
+}
+
+export interface TestWallet {
+  keypair: nacl.SignKeyPair;
+  wallet: string;
+}
+
+/** Ephemeral Ed25519 wallet; never a real key. */
+export function newWallet(): TestWallet {
+  const keypair = nacl.sign.keyPair();
+  return { keypair, wallet: base58Encode(keypair.publicKey) };
+}
+
+/** Detached Ed25519 signature over `message`, base58 as a wallet adapter returns it. */
+export function signMessage(keypair: nacl.SignKeyPair, message: string): string {
+  return base58Encode(nacl.sign.detached(new TextEncoder().encode(message), keypair.secretKey));
+}
+
+export interface SignInOptions {
+  /** Client IP sent as `X-Forwarded-For`; vary it to stay under the auth rate limit. */
+  ip?: string;
+}
+
+/** Runs nonce → sign → verify and returns the JWT. */
+export async function signIn(
+  app: Express,
+  keypair: nacl.SignKeyPair,
+  opts: SignInOptions = {},
+): Promise<string> {
+  const wallet = base58Encode(keypair.publicKey);
+  const ip = opts.ip ?? `192.0.2.${Math.floor(Math.random() * 250) + 1}`;
+  const nonceRes = await request(app)
+    .post('/api/auth/nonce')
+    .set('X-Forwarded-For', ip)
+    .send({ wallet });
+  if (nonceRes.status !== 200) throw new Error(`nonce failed: ${nonceRes.status}`);
+  const { nonce, message } = NonceResponseSchema.parse(nonceRes.body);
+  const verifyRes = await request(app)
+    .post('/api/auth/verify')
+    .set('X-Forwarded-For', ip)
+    .send({ wallet, nonce, signature: signMessage(keypair, message) });
+  if (verifyRes.status !== 200) throw new Error(`verify failed: ${verifyRes.status}`);
+  return VerifyResponseSchema.parse(verifyRes.body).token;
+}
+
+/** `Authorization` header value for a JWT or API key. */
+export function bearer(token: string): string {
+  return `Bearer ${token}`;
 }

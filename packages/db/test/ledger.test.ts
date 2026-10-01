@@ -1,5 +1,7 @@
 import { HOLD_TTL_MS, isAppError } from '@ibt/shared';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+import { testDbUri } from './db-uri.js';
 
 import {
   ALL_MODELS,
@@ -56,7 +58,7 @@ async function balances(userId: Types.ObjectId): Promise<{ balance: bigint; held
 
 describe('ledger service', () => {
   beforeAll(async () => {
-    await connectDb(inject('mongoUri'));
+    await connectDb(testDbUri('ledger'));
     await syncAllIndexes();
   });
 

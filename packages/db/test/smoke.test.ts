@@ -1,10 +1,12 @@
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { testDbUri } from './db-uri.js';
 
 import { connectDb, disconnectDb, mongoose } from '../src/index.js';
 
 describe('@ibt/db', () => {
   beforeAll(async () => {
-    await connectDb(inject('mongoUri'));
+    await connectDb(testDbUri('smoke'));
   });
 
   afterAll(async () => {

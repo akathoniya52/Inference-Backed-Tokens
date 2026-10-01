@@ -1,4 +1,6 @@
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { testDbUri } from './db-uri.js';
 
 import {
   ALL_MODELS,
@@ -84,7 +86,7 @@ function sameKey(a: Record<string, number>, b: Record<string, number>): boolean 
 
 describe('syncAllIndexes', () => {
   beforeAll(async () => {
-    await connectDb(inject('mongoUri'));
+    await connectDb(testDbUri('indexes'));
     await syncAllIndexes();
   });
 

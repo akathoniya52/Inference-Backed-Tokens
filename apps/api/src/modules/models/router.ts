@@ -5,12 +5,15 @@ import {
   PaginationQuerySchema,
   UpdateModelRequestSchema,
 } from '@ibt/shared';
+import { Models, type Types } from '@ibt/db';
+import { AppError, HealthCheckResponseSchema } from '@ibt/shared';
 import { Router } from 'express';
 
 import type { AppContext } from '../../app.js';
 import { requireAuthUser } from '../../context.js';
 import { jwtAuth } from '../../middleware/jwtAuth.js';
 import { parseInput } from '../../validate.js';
+import { runHealthCheck, type HealthCheckModel } from './health.js';
 import { createModel, getModelBySlug, listModels, updateModel } from './service.js';
 
 export function modelsRouter(ctx: AppContext): Router {
@@ -37,6 +40,17 @@ export function modelsRouter(ctx: AppContext): Router {
     const { id } = parseInput(IdParamsSchema, req.params);
     const patch = parseInput(UpdateModelRequestSchema, req.body);
     res.json(await updateModel(ctx, userId, id, patch));
+  });
+
+  router.post('/:id/health-check', auth, async (req, res) => {
+    const { userId } = requireAuthUser(req);
+    const { id } = parseInput(IdParamsSchema, req.params);
+    const model = await Models.findById(id)
+      .select({ slug: 1, upstream: 1, status: 1, providerId: 1 })
+      .lean<HealthCheckModel & { providerId: Types.ObjectId }>();
+    if (!model) throw new AppError('model_not_found');
+    if (!model.providerId.equals(userId)) throw new AppError('forbidden');
+    res.json(HealthCheckResponseSchema.parse(await runHealthCheck(ctx, model)));
   });
 
   return router;

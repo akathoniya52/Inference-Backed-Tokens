@@ -4,7 +4,16 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@ibt/chain": "workspace:*",
+    "@ibt/db": "workspace:*",
     "@ibt/shared": "workspace:*",
-    "tsx": "^4.23.0"
+    "@solana/web3.js": "^1.99.0",
+    "bs58": "^6.0.0",
+    "tsx": "^4.23.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/autocannon": "^7.12.7",
+    "autocannon": "^8.0.0"
   }
 }

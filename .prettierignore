@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+pnpm-lock.yaml
+Plan.md
+.sisyphus
+playwright-report
+*.tsbuildinfo

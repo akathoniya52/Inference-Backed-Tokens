@@ -7,3 +7,4 @@ coverage
 *.keypair.json
 id.json
 .DS_Store
+*.tsbuildinfo

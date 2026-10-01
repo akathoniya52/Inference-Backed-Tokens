@@ -16,5 +16,16 @@
     "format:check": "prettier --check .",
     "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
     "smoke:local": "pnpm --filter ./scripts exec tsx --conditions=development smoke-local.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "~9.39.5",
+    "@types/node": "^20.19.43",
+    "eslint": "~9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "prettier": "^3.9.9",
+    "tsx": "^4.23.15",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.71.0",
+    "vitest": "^3.2.7"
   }
 }

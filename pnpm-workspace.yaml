@@ -5,11 +5,13 @@ packages:
 
 overrides:
   '@solana/web3.js': ^1.99.0
-
-onlyBuiltDependencies:
-  - esbuild
-  - mongodb-memory-server
-  - bufferutil
-  - utf-8-validate
+  vite: ~5.4.21
 
 injectWorkspacePackages: true
+
+# pnpm 12 replaced onlyBuiltDependencies with allowBuilds
+allowBuilds:
+  esbuild: true
+  mongodb-memory-server: true
+  bufferutil: true
+  utf-8-validate: true

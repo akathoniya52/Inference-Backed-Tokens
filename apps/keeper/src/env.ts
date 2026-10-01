@@ -21,6 +21,7 @@ export const KeeperEnvSchema = z.object({
   KEEPER_SECRET_KEY: optional,
   MONGODB_URI: z.string().min(1),
   SETTLEMENT_CRON: z.string().default('5 * * * *'),
+  RECONCILE_CRON: z.string().default('0 3 * * *'),
   MAX_SLICE_SOL_PER_RUN: decimal.default('2'),
   MAX_PAYOUT_USDC_PER_RUN: decimal.default('500'),
   FLOAT_MIN_SOL: decimal.default('0.5'),

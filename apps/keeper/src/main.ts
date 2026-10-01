@@ -12,6 +12,7 @@ import { FLOAT_MONITOR_CRON, createFloatMonitor } from './jobs/floatMonitor.js';
 import { HEALTH_CHECK_CRON, createHealthCheckJob } from './jobs/healthCheck.js';
 import { HOLD_EXPIRY_CRON, createHoldExpiryJob } from './jobs/holdExpiry.js';
 import { POOL_POLLER_CRON, createPoolPoller } from './jobs/poolPoller.js';
+import { createReconcileJob } from './jobs/reconcile.js';
 import { STATS_CRON, createStatsJob } from './jobs/stats.js';
 import { createLease } from './lease.js';
 import { buildKeeperCtx } from './runtime.js';
@@ -56,6 +57,10 @@ async function main(): Promise<void> {
   } else {
     logger.warn('ADMIN_TOKEN is not set; healthCheck job disabled');
   }
+  const reconcile = createReconcileJob(ctx);
+  scheduler.add('reconcile', env.RECONCILE_CRON, async () => {
+    await reconcile.tick();
+  });
   const orchestrator = createOrchestrator(ctx);
   scheduler.add('settle', env.SETTLEMENT_CRON, async () => {
     await orchestrator.run();

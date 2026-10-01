@@ -10,3 +10,4 @@ export const SHARED_SOURCE_URL = import.meta.url;
 export * from './constants.js';
 export * from './money.js';
 export * from './pricing.js';
+export * from './split.js';

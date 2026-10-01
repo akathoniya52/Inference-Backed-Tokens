@@ -7,7 +7,10 @@ overrides:
   '@solana/web3.js': ^1.99.0
   vite: ~5.4.21
 
-injectWorkspacePackages: true
+# Keep workspace packages as plain symlinks. Injected copies (the default when peer
+# sets differ) gave api a stale copy of @ibt/chain and keeper a stale copy of @ibt/db,
+# and loaded a second @ibt/shared so `instanceof AppError` failed across packages.
+injectWorkspacePackages: false
 
 # pnpm 12 replaced onlyBuiltDependencies with allowBuilds
 allowBuilds:

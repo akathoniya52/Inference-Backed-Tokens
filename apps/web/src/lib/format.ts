@@ -1,5 +1,6 @@
 import {
   formatUnits as formatExactUnits,
+  parseUnits,
   SOL_DECIMALS,
   toBigInt,
   USDC_DECIMALS,
@@ -69,4 +70,53 @@ export function formatPct(ratio: number, fractionDigits = 1): string {
   const fixed = (ratio * 100).toFixed(fractionDigits);
   const trimmed = fixed.includes('.') ? fixed.replace(/\.?0+$/, '') : fixed;
   return `${trimmed === '-0' ? '0' : trimmed}%`;
+}
+
+/**
+ * Formats an API decimal string (e.g. `"312.448120"` USDC, `"3.215"` SOL)
+ * without going through floats: rounds to `maxFractionDigits`, groups the
+ * whole part and pads the fraction to `minFractionDigits`.
+ */
+export function formatDecimal(
+  value: string,
+  maxFractionDigits: number,
+  minFractionDigits = 0,
+): string {
+  assertDigitCount(maxFractionDigits, 'maxFractionDigits');
+  assertDigitCount(minFractionDigits, 'minFractionDigits');
+  if (minFractionDigits > maxFractionDigits) {
+    throw new RangeError('minFractionDigits must not exceed maxFractionDigits');
+  }
+  const decimals = value.split('.')[1]?.length ?? 0;
+  const formatted = formatUnits(parseUnits(value, decimals), decimals, maxFractionDigits);
+  const [whole = '', fraction = ''] = formatted.split('.');
+  const padded = fraction.padEnd(minFractionDigits, '0');
+  return padded.length > 0 ? `${whole}.${padded}` : whole;
+}
+
+const COUNT_FORMAT = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+
+export function formatCount(value: number): string {
+  return COUNT_FORMAT.format(value);
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function utcDate(date: Date): string {
+  return `${date.getUTCDate()} ${MONTHS[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+}
+
+function utcTime(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+}
+
+/** Settlement window in UTC, e.g. `'2 Oct 2026, 13:00–14:00 UTC'`. */
+export function formatPeriod(startIso: string, endIso: string): string {
+  const start = new Date(startIso);
+  const end = new Date(endIso);
+  if (utcDate(start) === utcDate(end)) {
+    return `${utcDate(start)}, ${utcTime(start)}–${utcTime(end)} UTC`;
+  }
+  return `${utcDate(start)}, ${utcTime(start)} – ${utcDate(end)}, ${utcTime(end)} UTC`;
 }

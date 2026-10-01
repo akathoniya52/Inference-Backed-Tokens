@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatPct, formatSol, formatUnits, formatUsdc, shortAddress } from './format';
+import {
+  formatCount,
+  formatDecimal,
+  formatPct,
+  formatPeriod,
+  formatSol,
+  formatUnits,
+  formatUsdc,
+  shortAddress,
+} from './format';
 
 describe('formatUnits', () => {
   it('formats zero without a fraction', () => {
@@ -104,5 +113,47 @@ describe('formatPct', () => {
   it('renders non-finite input as a dash', () => {
     expect(formatPct(Number.NaN)).toBe('—');
     expect(formatPct(Number.POSITIVE_INFINITY)).toBe('—');
+  });
+});
+
+describe('formatDecimal', () => {
+  it('rounds API decimal strings to maxFractionDigits and groups the whole part', () => {
+    expect(formatDecimal('312.448120', 2)).toBe('312.45');
+    expect(formatDecimal('1234567.5', 2)).toBe('1,234,567.5');
+    expect(formatDecimal('0.0000000061', 4)).toBe('0');
+    expect(formatDecimal('-0.004', 2)).toBe('0');
+  });
+
+  it('pads to minFractionDigits', () => {
+    expect(formatDecimal('14.3', 6, 2)).toBe('14.30');
+    expect(formatDecimal('0.200000', 6, 2)).toBe('0.20');
+    expect(formatDecimal('3', 4, 2)).toBe('3.00');
+    expect(formatDecimal('0.000123', 6, 2)).toBe('0.000123');
+  });
+
+  it('rejects non-decimal input', () => {
+    expect(() => formatDecimal('1e3', 2)).toThrow(RangeError);
+    expect(() => formatDecimal('1', 1, 2)).toThrow(RangeError);
+  });
+});
+
+describe('formatCount', () => {
+  it('groups integers', () => {
+    expect(formatCount(48211)).toBe('48,211');
+    expect(formatCount(0)).toBe('0');
+  });
+});
+
+describe('formatPeriod', () => {
+  it('formats an hourly UTC window', () => {
+    expect(formatPeriod('2026-10-02T13:00:00.000Z', '2026-10-02T14:00:00.000Z')).toBe(
+      '2 Oct 2026, 13:00–14:00 UTC',
+    );
+  });
+
+  it('spells out both dates when the window crosses midnight', () => {
+    expect(formatPeriod('2026-10-02T23:00:00.000Z', '2026-10-03T00:00:00.000Z')).toBe(
+      '2 Oct 2026, 23:00 – 3 Oct 2026, 00:00 UTC',
+    );
   });
 });

@@ -1,0 +1,81 @@
+import type {
+  ListModelsResponse,
+  Model,
+  SettlementsResponse,
+  TokenStateResponse,
+} from '@ibt/shared';
+import { skipToken, useInfiniteQuery, useQuery } from '@tanstack/react-query';
+
+import { apiFetch } from './api';
+
+// Public read queries for Explore and the token page (spec L502). Keys stay
+// local so they cannot collide with the shapes cached under `queryKeys`.
+
+export const TOKEN_STATE_REFETCH_MS = 10_000;
+export const SETTLEMENTS_REFETCH_MS = 60_000;
+export const MODELS_PAGE_LIMIT = 24;
+
+export const publicQueryKeys = {
+  models: () => ['models', 'list'] as const,
+  model: (slug: string) => ['model', slug] as const,
+  tokenState: (mint: string) => ['tokenState', mint] as const,
+  settlements: (mint: string) => ['settlements', mint] as const,
+};
+
+function pageQuery(cursor: string | null, limit?: number): string {
+  const params = new URLSearchParams();
+  if (cursor !== null) params.set('cursor', cursor);
+  if (limit !== undefined) params.set('limit', String(limit));
+  const query = params.toString();
+  return query === '' ? '' : `?${query}`;
+}
+
+export function useModels() {
+  return useInfiniteQuery({
+    queryKey: publicQueryKeys.models(),
+    queryFn: ({ pageParam, signal }) =>
+      apiFetch<ListModelsResponse>(`/api/models${pageQuery(pageParam, MODELS_PAGE_LIMIT)}`, {
+        signal,
+      }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
+  });
+}
+
+export function useModel(slug: string) {
+  return useQuery({
+    queryKey: publicQueryKeys.model(slug),
+    queryFn: ({ signal }) => apiFetch<Model>(`/api/models/${encodeURIComponent(slug)}`, { signal }),
+  });
+}
+
+export function useTokenState(mint: string | null) {
+  return useQuery({
+    queryKey: publicQueryKeys.tokenState(mint ?? ''),
+    queryFn:
+      mint === null
+        ? skipToken
+        : ({ signal }) =>
+            apiFetch<TokenStateResponse>(`/api/tokens/${encodeURIComponent(mint)}/state`, {
+              signal,
+            }),
+    refetchInterval: TOKEN_STATE_REFETCH_MS,
+  });
+}
+
+export function useSettlements(mint: string | null) {
+  return useInfiniteQuery({
+    queryKey: publicQueryKeys.settlements(mint ?? ''),
+    queryFn:
+      mint === null
+        ? skipToken
+        : ({ pageParam, signal }) =>
+            apiFetch<SettlementsResponse>(
+              `/api/tokens/${encodeURIComponent(mint)}/settlements${pageQuery(pageParam)}`,
+              { signal },
+            ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
+    refetchInterval: SETTLEMENTS_REFETCH_MS,
+  });
+}

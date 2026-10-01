@@ -1,0 +1,15 @@
+packages:
+  - apps/*
+  - packages/*
+  - scripts
+
+overrides:
+  '@solana/web3.js': ^1.99.0
+
+onlyBuiltDependencies:
+  - esbuild
+  - mongodb-memory-server
+  - bufferutil
+  - utf-8-validate
+
+injectWorkspacePackages: true

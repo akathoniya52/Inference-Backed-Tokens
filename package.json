@@ -1,0 +1,20 @@
+{
+  "name": "inference-backed-tokens",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=20.18.1 <21"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc -b",
+    "test": "pnpm -r test",
+    "build": "pnpm -r build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
+    "smoke:local": "pnpm --filter ./scripts exec tsx --conditions=development smoke-local.ts"
+  }
+}

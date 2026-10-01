@@ -1,0 +1,873 @@
+# Inference-Backed Tokens: implementation work plan
+
+
+---
+
+## 1. TL;DR
+
+- **What gets built:** a pnpm TypeScript monorepo (`apps/api`, `apps/keeper`, `apps/web`, `apps/mock-upstream`, `packages/shared`, `packages/chain`, `packages/db`, `scripts/`). It contains:
+  - an OpenAI-compatible metered gateway with hold → capture billing;
+  - a keeper that settles revenue hourly 70/20/10, buys the model token on the Meteora DBC curve, cranks migration to DAMM v2, and adds and permanently locks DAMM v2 liquidity;
+  - a React/Vite web app where users sign every transaction with their own wallet.
+- **Source spec:** `/Users/user/Desktop/43 /Inference-Backed Tokens/Plan.md` (678 lines, authoritative). In this plan, `L123` means a line in that file.
+- **Done means:** from a clean clone, `pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test && pnpm build` passes and `docker build .` succeeds.
+- **Done also means:** `pnpm smoke:local` passes against the local stack. It covers sign-in, key creation, the chat completion call, hold → capture, balance decrease, and one keeper settlement on the fake chain.
+- **Out of agent scope:** every step that uses real keys, real funds, or mainnet is in §7 (human-only).
+
+## 2. Assumptions and resolved decisions
+
+| # | Decision | Resolution | Rationale |
+|---|---|---|---|
+| A1 | Naming (L671) | "Inference-Backed Tokens", npm scope `@ibt/*`; providers choose token symbols | Spec default |
+| A2 | Provider vesting (L672) | None; all `lockedVesting` fields are 0 | Spec default |
+| A3 | Burn-to-credit (L673) | Not built; holder discount instead | Spec default |
+| A4 | Split (L674) | 7000/2000/1000 bps, stored per model | Spec default |
+| A5 | Launch classes (L675) | One class: 10 SOL on mainnet, 1 SOL on devnet | Spec default |
+| A6 | Float refill (L676) | Manual (`scripts/refill-float.ts` plus runbook) | Spec default |
+| A7 | Indexer (L677) | Polling only | Spec default |
+| A8 | DLMM (L678) | Not used | Spec default |
+| G1 | Missing diagrams (L56, L608) | Architecture: README ASCII diagram based on L52–66. Roadmap: 5 gates, see §6 header | Rebuilt from the spec text |
+| G2 | "DBC backtester fallback" (L610) | **Out of scope**; no task | Never defined |
+| G3 | Lint/format | ESLint 9 flat config + typescript-eslint 8 + eslint-plugin-react-hooks + Prettier 3 | typescript-eslint supports ESLint 9; ESLint 10 is newer than needed |
+| G4 | Mock upstream | `apps/mock-upstream` (`@ibt/mock-upstream`). Exports `createMockUpstream()` for tests and runs on `:4010` for local dev | One mock shared by tests, local dev and the load test |
+| G5 | Ports | api 4000, keeper 4001 (`/healthz`), web 5173, mock 4010, mongo 27017 | As briefed |
+| G6 | Mongo topology | `mongo:7 --replSet rs0` with an init healthcheck; tests use `MongoMemoryReplSet` | L259 requires sessions/transactions, which require a replica set |
+| G7 | Dockerfile | One multi-stage `node:20-bookworm-slim` image with pnpm via corepack. Start commands are `node apps/api/dist/main.js` and `node apps/keeper/dist/main.js` (L547) | Matches the spec |
+| G8 | `@solana/web3.js` | **1.x, pinned `^1.99.0`**, deduplicated with a pnpm override | DBC SDK needs `^1.98.0`, cp-amm needs `^1.95.3`, wallet-adapter-react 0.15.40 needs peer `^1.99.0` |
+| G9 | Express | **Express 5.2** | helmet, cors and pino-http don't depend on the framework; express-rate-limit 8 declares peer `express >=4.11`. Express 5 forwards rejected async handlers to the error handler. Watch out: route `GET /metadata/:file` and strip `.json` (path-to-regexp v8). `req.query` is a getter, so validation middleware stores parsed values on `res.locals` (or `req.validated`) and never reassigns `req.query`. `res.json` throws on BigInt, so every DTO converts BigInt to strings at the response boundary |
+| G10 | Module system | ESM everywhere. Node packages use TS `module/moduleResolution: NodeNext`; web uses `Bundler`. Workspace `exports` use a `development` condition → `src/*.ts` and `default` → `dist/*.js`. tsx runs with `--conditions=development`, and vitest/vite set `resolve.conditions` (and `ssr.resolve.conditions`, since vitest resolves Node tests through SSR). **Typecheck note:** TS ignores the `development` condition, so every workspace `exports` entry also needs `types` → `dist/*.d.ts`, and `pnpm typecheck` runs `tsc -b` with project references in dependency order. Never add `customConditions` to the build tsconfig (TS6059 rootDir errors). If P0-T3 shows vitest does not pick up `development`, fall back to `resolve.alias` | Lets dev and tests run without building first; prod runs from `dist` |
+| G11 | Mongoose models location | New package `packages/db` (`@ibt/db`), shared by the api and the keeper. `@ibt/db` owns the only `mongoose` dependency and re-exports the connection, the models and the ledger service (P3-T6); api, keeper and scripts never depend on `mongoose` directly. Tests call `syncIndexes()` on every model before the first transaction, and all multi-doc writes use `session.withTransaction` so transient errors retry | Both deployables need the same schemas; `shared` must stay browser-safe. Two mongoose copies would register models on different singletons and queries would hang on buffering; `autoIndex` races cause WriteConflicts |
+| G12 | Health-check vs L190 ("keeper never calls the provider model"); `MASTER_KEY` is api-only | The health check runs **in the api**. The keeper's `healthCheck` job calls `POST /api/admin/health-checks/run` (admin token, `API_INTERNAL_URL`) every 60 s | Keeps the upstream keys in the api; resolves the conflict between L190 and L250 |
+| G13 | Extra operational collections | `nonces` (TTL 5 min), `idempotency` (unique `(userId,key)`, TTL 24 h, stores the response), `leases` (L253) | Implied by L223, L148, L253; the 8 business collections stay unchanged |
+| G14 | Overdraft guard | Add `users.heldMicroUsdc`. A hold is a conditional `$inc` with `$expr: balance − held ≥ estimate` | Atomic version of L236/L520; the load test checks there are zero negative balances |
+| G15 | Ledger hold lifecycle | Hold rows get `status: open/captured/released/expired` and `expiresAt` (+10 min) | L237, L520 |
+| G16 | Cost rounding | `cost = ceil((pt·inPrice + ct·outPrice) / 1e6)` in BigInt; discount = `floor(cost·(10000−bps)/10000)`; split floors provider and liquidity, and the **remainder goes to the platform** | L150, L587 |
+| G17 | No-token phase | Provider share = `providerBps + liquidityBps` (90%) | L166 |
+| G18 | Run caps | Payout above `MAX_PAYOUT_USDC_PER_RUN` goes to `token.carryOverMicroUsdc`. Slice above `MAX_SLICE_SOL_PER_RUN` goes to a new `token.sliceCarryOverMicroUsdc` | L182, L521 |
+| G19 | Compounding (L179) | New field `token.pendingCompoundLamports`, added to the next run's slice; claim signature stored in `settlements.liquidity.claimTxSignature` | Gives step 6 durable state |
+| G20 | Resume pointer | `settlements.lastCompletedState` plus extra signatures `liquidity.swapTxSignature` and `liquidity.migrationSignature`. On the curve phase, `locked` means "liquidity step complete" with `lockTxSignature: null`. Every chain send also writes `settlements.pendingTx {step, signature, lastValidBlockHeight}` through the `onSigned` hook (P2-T3) **before** the tx is sent; resume checks `getSignatureStatuses` on it before rebuilding | L172, L375, L599 |
+| G21 | Daily spend cap (L517) | `apiKeys.dailyCapMicroUsdc` (default 50 USDC), set on `POST /api/keys`. Exceeding it returns 429 `daily_cap_exceeded` | The spec defines the cap but no error code |
+| G22 | Sign-in message | Fixed template in shared: `"{domain} wants you to sign in with your Solana account:\n{wallet}\n\nNonce: {nonce}\nIssued At: {iso}"` | L518 |
+| G23 | Local credits | `seed-models.ts --dev-credit` writes an `adjust` ledger row; refuses when `CLUSTER=mainnet-beta`, and also refuses unless the `MONGODB_URI` host is `localhost` or `127.0.0.1` (same guard for `--fake-token`) | The local happy path has no USDC deposit; the host guard stops free credits landing in prod Atlas when `CLUSTER=devnet` is mis-set |
+| G24 | Chain mode | `CHAIN_MODE=real\|fake` for api and keeper. `fake` uses `FakeChainClient` and is refused on mainnet, and also refused unless the `MONGODB_URI` host is `localhost` or `127.0.0.1` | Needed for the DoD and local runs |
+| G25 | SOL price source (L177) | `PriceSource` interface: Jupiter implementation with URL from env `JUPITER_PRICE_URL` (no hard-coded URL; P2-T1 confirms the endpoint from Jupiter docs) plus a fake | URL not verified |
+| G26 | Extra env vars | `KEEPER_WALLET` (api, for `/admin/float`), `ADMIN_IP_ALLOWLIST`, `API_INTERNAL_URL`, `KEEPER_PORT`, `CHAIN_MODE`, `JUPITER_PRICE_URL`, `JUPITER_API_KEY` (Jupiter's price API may require a key), `MOCK_UPSTREAM_PORT`, `DEVNET_E2E`, `TRUST_PROXY` (api, default `1`), `RATE_LIMIT_PER_MIN` and `DAILY_CAP_USDC` (api, optional overrides of the shared constants, P8-T6) | Implied by the controls in the spec |
+| G27 | Telegram (cut list) | `Alerter` interface: log transport in P1, Telegram transport in P6-T9 | L627 |
+| G28 | Streaming usage | Forward `stream_options.include_usage=true` upstream only when the per-model flag `upstream.supportsStreamUsage` is true (default false; some upstreams reject `stream_options` with 400). If the final chunk has no usage, count with tiktoken (`usageEstimated: true`) | L147 |
+| G29 | Playwright | Local smoke of public pages runs in CI. The full wallet flow test is tagged `@staging` and skipped unless `STAGING_URL` is set; the operator runs it | L592 |
+| G30 | Deposit fixtures | Built in the parsed-tx JSON shape by a fixture builder. The operator later adds a real recorded devnet deposit (H9) | Agents must not move funds |
+| G31 | Git | P0-T1 runs `git init -b main` (the implementer does this, not the planner) | CI and commits need a repo |
+
+## 3. Prerequisites (checked on this machine, 2026-10-01)
+
+| Tool | Check | Found | Fallback |
+|---|---|---|---|
+| Node 20 | `node -v` | **v20.20.2** ✅ (≥ 20.19 needed by mongodb-memory-server 11 / ESLint 10; we pin lower majors anyway) | `nvm install 20` |
+| pnpm | `pnpm -v` | **12.6.0** ✅ | `corepack enable && corepack prepare pnpm@12.6.0 --activate` |
+| npm | `npm -v` | 10.8.2 ✅ | — |
+| corepack | `corepack --version` | 0.34.6 ✅ | — |
+| Docker | `docker --version` / `docker compose version` | 29.4.3 / Compose v5.1.3 ✅ | Tests use mongodb-memory-server; local dev can use Atlas M0 (L543) |
+| git | `git --version` | 2.53.0 ✅ | optional |
+| Solana CLI | `solana --version` | **missing** | Not required; scripts use web3.js |
+
+## 4. Pinned versions
+
+Versions were confirmed with `npm view` against the npm registry on 2026-10-01. The SDK API surface was confirmed by reading the published `dist/index.d.ts` on unpkg. I used about 9 network commands rather than the 8-lookup budget, because some re-downloaded the same `.d.ts`. I didn't use context7 or librarian agents: the project folder is empty, so there was nothing for them to explore.
+
+| Package | Pin | Note / source |
+|---|---|---|
+| typescript | `~5.9.3` | Latest is 7.0.2, but the spec says TS 5 (L207) |
+| tsx | `^4.23` | registry |
+| @meteora-ag/dynamic-bonding-curve-sdk | `1.5.13` (exact) | deps: web3.js ^1.98, anchor ^0.31, spl-token ^0.4.13; ships CJS `dist/index.cjs` |
+| @meteora-ag/cp-amm-sdk | `1.5.1` (exact) | deps: web3.js ^1.95.3, anchor ^0.31 |
+| @solana/web3.js | `^1.99.0` | override to a single copy via `overrides:` in `pnpm-workspace.yaml` (pnpm 10+ no longer reads `pnpm.overrides` from `package.json`) |
+| @solana/spl-token | `^0.4.15` | |
+| @solana/wallet-adapter-react / -react-ui / -wallets / -base | `0.15.40` / `0.9.40` / `0.19.39` / `0.9.28` | peer web3 ^1.99.0 |
+| express | `^5.2.1` (+ `@types/express@5`) | G9 |
+| helmet / cors / express-rate-limit | `^8.3` / `^2.8.6` / `^8.7` | |
+| mongoose | `~8.24.4` | Spec says 8 (L209); latest is 9.10, not used |
+| mongodb-memory-server | `^10.4.3` | 11.x needs Node ≥ 20.19. Set `MONGOMS_VERSION=7.0.14` explicitly to match `mongo:7` (exact patch confirmed in P0-T3) |
+| zod | `^4.6` | registry; no peer conflicts |
+| pino / pino-http | `^9.14` / `^10.5` | Conservative majors (pino 10 / pino-http 11 exist) |
+| undici | `^7.30` | **8.x needs Node ≥ 22.19**, so not used; 7.x needs ≥ 20.18.1 ✅ |
+| jose / tweetnacl / bs58 | `^6.2` / `^1.0.3` / `^6.0` | jose and bs58 are ESM-only; fine under G10 |
+| node-cron | `^4.6` | v4 API: `cron.schedule(expr, fn)` returns a task; no `scheduled` option |
+| tiktoken | `^1.0.22` | WASM |
+| vitest | `^3.2.7` | depends on `vite ^5\|\|^6\|\|^7`, so it works with Vite 5 |
+| supertest / @playwright/test / autocannon | `^7.3` / `^1.63` / `^8.0` | |
+| react / react-dom | `18.3.1` | Spec says 18 |
+| react-router-dom | `~6.30.6` | Spec says 6 |
+| vite / @vitejs/plugin-react | `~5.4.21` / `^4.7` | Spec says Vite 5 (latest is 8, not used) |
+| vite-plugin-node-polyfills | `^0.28` | peer includes vite ^5 ✅; include `buffer` + `process` only (`crypto`/`stream` pull in crypto-browserify and often break the build) |
+| tailwindcss / postcss / autoprefixer | `~3.4.19` | v3 keeps `tailwind.config.ts` (v4 dropped it) |
+| @tanstack/react-query | `^5.104` | peer react ^18 |
+| lightweight-charts | `^5.2` | v5 API: `chart.addSeries(LineSeries)` |
+| @testing-library/react / @testing-library/dom / jsdom | `^16.3` / `^10` / `~25.0.1` | **jsdom 30 needs Node 22**, so not used |
+| eslint / typescript-eslint / prettier | `~9.39` / `^8.71` / `^3.9` | typescript-eslint peer TS < 6.1 ✅ |
+
+**Meteora SDK surface check:** all 19 names listed in the brief exist. The spec has drift in these places, which P2-T1 must encode:
+
+| Spec says (L96–124) | Installed SDK 1.5.13 / cp-amm 1.5.1 |
+|---|---|
+| `TokenType.SPL` | **`TokenType.SPLToken`** |
+| `tokenUpdateAuthority: TokenUpdateAuthorityOption.Immutable` | **`tokenAuthorityOption: TokenAuthorityOption.Immutable`** |
+| `migrateToDammV2({ payer, virtualPool, dammConfig })` | **`{ payer, pool, dammConfig }`**; returns `{ transaction, firstPositionNftKeypair, secondPositionNftKeypair }`, and **both keypairs must co-sign** |
+| pool metrics `totalTradingQuoteFee` | `client.state.getPoolFeeMetrics(pool).total.totalTradingQuoteFee` |
+| `DAMM_V2_MIGRATION_FEE_ADDRESS[2]` | Exported as `PublicKey[]`; the value at `[2]` must equal `Hv8Lmz…cjp` (assert it in a test) |
+| cp-amm builders | Return `TxBuilder = Promise<Transaction>`; `derivePoolAddress(config, tokenAMint, tokenBMint)`, token ordering not verified |
+| Confirmed OK | `buildCurve`, `client.partner.createConfig`, `client.pool.createPool/swapQuote2/swap2`, `client.migration.migrateToDammV2`, `client.partner.claimPartnerTradingFee`, `client.creator.claimCreatorTradingFee`, `client.state.getPool/getPoolConfig`, `deriveDbcPoolAddress(quoteMint, baseMint, config)`, `getCurrentPoint`, `SwapMode.PartialFill`, enums `BaseFeeMode.FeeSchedulerExponential`, `MigrationOption.MET_DAMM_V2`, `MigrationFeeOption.FixedBps100`, `CollectFeeMode.QuoteToken`, `ActivationType.Timestamp`, `TokenDecimal.SIX/NINE`; cp-amm `claimPositionFee`, `createPositionAndAddLiquidity`, `addLiquidity`, `permanentLockPosition`, `getDepositQuote`, `getQuote2`, `swap2`, `fetchPoolState` |
+
+## 5. Target repository tree
+
+```text
+.
+├── Plan.md                                  (read-only spec)
+├── README.md  .gitignore  .editorconfig  .nvmrc  .npmrc  .prettierrc  .prettierignore
+├── package.json  pnpm-workspace.yaml  pnpm-lock.yaml  tsconfig.base.json  tsconfig.json
+├── eslint.config.js  docker-compose.yml  Dockerfile  .dockerignore
+├── .github/workflows/ci.yml
+├── apps/
+│   ├── api/  package.json tsconfig.json vitest.config.ts .env.example
+│   │   ├── src/main.ts app.ts env.ts logger.ts
+│   │   ├── src/middleware/{requestId,errorHandler,jwtAuth,apiKeyAuth,adminAuth,rateLimits}.ts
+│   │   ├── src/modules/auth/{routes,service}.ts
+│   │   ├── src/modules/apiKeys/{routes,service}.ts
+│   │   ├── src/modules/models/{routes,service,health}.ts
+│   │   ├── src/modules/billing/{routes,deposits,usage}.ts        (ledger service lives in @ibt/db)
+│   │   ├── src/modules/gateway/{routes,estimate,forward,stream,settle,idempotency,discount,tokenCount}.ts
+│   │   ├── src/modules/tokens/{routes,service}.ts
+│   │   ├── src/modules/metadata/routes.ts
+│   │   ├── src/modules/admin/routes.ts
+│   │   ├── src/modules/me/routes.ts
+│   │   ├── src/ops/{health,alerts}.ts
+│   │   └── test/{setup.ts,helpers.ts,*.int.test.ts}
+│   ├── keeper/  package.json tsconfig.json vitest.config.ts .env.example
+│   │   ├── src/main.ts env.ts lease.ts scheduler.ts health-server.ts cli/settle-once.ts
+│   │   ├── src/jobs/{poolPoller,migrationCrank,healthCheck,floatMonitor,holdExpiry,stats,reconcile}.ts
+│   │   ├── src/settlement/{engine,steps,period,orchestrator}.ts
+│   │   └── test/{setup.ts,helpers.ts,settlement.*.test.ts,jobs.*.test.ts}
+│   ├── web/  package.json tsconfig.json vite.config.ts vitest.config.ts tailwind.config.ts
+│   │   │     postcss.config.js index.html playwright.config.ts .env.example
+│   │   ├── src/main.tsx App.tsx env.ts index.css
+│   │   ├── src/lib/{api,auth,format,queryKeys,solscan}.ts
+│   │   ├── src/hooks/useSendTx.ts
+│   │   ├── src/providers/{WalletProviders,QueryProvider}.tsx
+│   │   ├── src/components/{WalletGate,DepositUsdc,TradePanel,CurveProgress,ModelStats,
+│   │   │                   SettlementTable,LaunchWizard,ApiKeyManager,ClaimFees,ModelCard,PriceChart,Layout}.tsx
+│   │   ├── src/pages/{Explore,TokenPage,Launch,Dashboard,Provider,Docs}.tsx
+│   │   ├── src/**/*.test.tsx
+│   │   └── e2e/smoke.spec.ts
+│   └── mock-upstream/  package.json tsconfig.json src/{index,main}.ts test/mock.test.ts
+├── packages/
+│   ├── shared/  package.json tsconfig.json vitest.config.ts
+│   │   ├── src/index.ts constants.ts money.ts pricing.ts split.ts errors.ts signin.ts ids.ts
+│   │   ├── src/schemas/{chat,auth,keys,models,billing,tokens,admin,common}.ts
+│   │   ├── src/node/{index,crypto,logger,alerter,telegram,env}.ts   (subpath @ibt/shared/node)
+│   │   └── test/*.test.ts
+│   ├── chain/  package.json tsconfig.json vitest.config.ts
+│   │   ├── src/index.ts rpc.ts send.ts deposit.ts config.ts dbc.ts damm.ts spl.ts price.ts client.ts sdk.ts
+│   │   ├── src/testing/{fake-chain,fixtures}.ts                      (subpath @ibt/chain/testing)
+│   │   └── test/{*.test.ts,__snapshots__/config.test.ts.snap,fixtures/*.json}
+│   └── db/  package.json tsconfig.json vitest.config.ts
+│       ├── src/index.ts connect.ts ledger.ts models/{users,apiKeys,models,requests,ledger,deposits,
+│       │                     settlements,poolSnapshots,nonces,idempotency,leases}.ts
+│       └── test/{indexes,ledger}.test.ts
+└── scripts/  package.json tsconfig.json
+    ├── create-config.ts seed-models.ts refill-float.ts devnet-e2e.ts dev-signin.ts smoke-local.ts
+    └── load/gateway-load.ts
+```
+
+## 6. Phases and tasks
+
+**Gates** (these reconstruct the spec's 5-gate roadmap, L606–610):
+
+| Gate | Phases | Target date |
+|---|---|---|
+| G-Foundation | P0+P1 | Oct 2 |
+| G-Chain | P2 + `create-config --dry-run` + **H0** (real devnet create-config, launch, one swap) | Oct 4 |
+| G-Gateway | P3 + P4 core | Oct 5 |
+| G-Settlement | P5+P6 (operator devnet e2e H6 on Oct 8–9) | Oct 8 |
+| G-Ship | P7+P8+P9 CORE; mainnet launch H8/H10 so settlements run for 2+ days | Oct 10 |
+
+Oct 11 is buffer (optional Wave C cut tasks, human review). Oct 12 is reserved for the demo video and submission only (§7).
+
+**Conventions used in every task:**
+- **TDD:** write a failing test first, then implement, then refactor.
+- **Commit:** one commit per task, in the form `type(scope): summary [Pn-Tm]`.
+- **Scope tag:** `CORE` = MVP-core, `CUT` = MVP-cut-list (scheduled last).
+- **Category:** q=`quick`, uh=`unspecified-high`, d=`deep`, ub=`ultrabrain`, ve=`visual-engineering`.
+- **∥** means the task can run in parallel with siblings whose dependencies are met.
+- Web tasks load the `frontend-ui-ux` skill, and every task loads `git-master` for its commit.
+- **Test accepts name files, never `-t`:** `pnpm --filter <pkg> exec vitest run <path>` fails with "No test files found" when the path matches nothing, whereas a `-t <word>` that matches no test name skips everything and exits 0.
+- **Env loading:** nothing loads `.env` implicitly. Commands that need `MONGODB_URI` and friends use `node --env-file=<file>` or `tsx --env-file=<file>` explicitly.
+- **No secrets in the agent env:** agents' environments never contain any `*_SECRET_KEY`.
+
+### Phase 0: Scaffold, tooling, CI, compose (gate: install/lint/typecheck/test/build pass on skeletons)
+
+**P0-T1 Root workspace** · CORE · q · 1h · deps: none
+- **Files:** `package.json` (`packageManager: pnpm@12.6.0`, `engines.node ">=20.18.1 <21"`, scripts `lint typecheck test build format format:check dev smoke:local`), `pnpm-workspace.yaml` (`packages: apps/*, packages/*, scripts`; `overrides: {"@solana/web3.js": "^1.99.0"}`; `onlyBuiltDependencies: [esbuild, mongodb-memory-server, bufferutil, utf-8-validate]`; `injectWorkspacePackages: true` for `pnpm deploy` in P8-T5; pnpm 10+ reads these from the workspace file, not `package.json`), `.npmrc`, `.nvmrc` (`20.20`), `.gitignore` (`.env`, `dist`, `*.keypair.json`, `id.json`), `.editorconfig`, `tsconfig.base.json` (strict, NodeNext, `noUncheckedIndexedAccess`), `tsconfig.json` (references).
+- **Also:** `git init -b main`.
+- **Verify pnpm 10+ behaviour:** after `pnpm install`, confirm no "ignored build scripts" warning for the allow-listed packages.
+- **Accept:** `pnpm install` exits 0; `git status` shows a repo; `grep -q '@solana/web3.js' pnpm-workspace.yaml && grep -q onlyBuiltDependencies pnpm-workspace.yaml && grep -q 'injectWorkspacePackages: true' pnpm-workspace.yaml`. Single-copy check (`grep` does not prove it): `pnpm why -r @solana/web3.js | grep -o '@solana/web3.js@1\.[0-9.]*' | sort -u | wc -l` prints `1`; web3.js is first installed in P2-T1, so this command is also part of the P2-T1 and P7-T1 accepts.
+
+**P0-T2 ESLint + Prettier** · CORE · q · 1h · deps: P0-T1 · ∥ P0-T3..T5
+- **Files:** `eslint.config.js` (typescript-eslint recommendedTypeChecked with `parserOptions.projectService.allowDefaultProject: ['*.config.ts', '*.config.js', 'eslint.config.js']` so files outside any tsconfig don't error; react-hooks for `apps/web`; `no-floating-promises: error`; ban `console` except scripts), `.prettierrc`, `.prettierignore`; root script `format:check` = `prettier --check .` (`pnpm format --check` would append `--check` to `--write`).
+- **Accept:** `pnpm lint` exits 0; `pnpm format:check` exits 0.
+
+**P0-T3 Package skeletons (shared, chain, db, mock-upstream)** · CORE · q · 1.5h · deps: P0-T1 · ∥
+- **Files:** for each package, `package.json` (exports with a `development` condition plus `types` → `dist/*.d.ts`, G10), `tsconfig.json` (composite, no `customConditions`), `vitest.config.ts` (`resolve.conditions:['development']` and `ssr.resolve.conditions:['development']`), `src/index.ts`, `test/smoke.test.ts`.
+- **db:** `vitest` globalSetup starting `MongoMemoryReplSet` (`MONGOMS_VERSION=7.0.14`); `@ibt/db` is the only package depending on `mongoose` (G11).
+- **Confirm G10:** a smoke test in `@ibt/chain` imports `@ibt/shared` and asserts the resolved module path ends in `src/index.ts` (development condition used). If it resolves to `dist`, switch to `resolve.alias` and note it in G10.
+- **Accept:** `pnpm -r --filter "./packages/*" test` passes; `pnpm -r build` emits `dist/index.js` and `dist/index.d.ts`; `pnpm typecheck` passes on a fresh clone without a prior build.
+
+**P0-T4 App skeletons (api, keeper, web, scripts)** · CORE · q · 1.5h · deps: P0-T1 · ∥
+- **api:** `src/main.ts` with `GET /healthz`; dev `tsx watch --conditions=development src/main.ts`; build `tsc -b`.
+- **keeper:** `src/main.ts` with `/healthz` on 4001.
+- **web:** Vite 5 + React 18 minimal `App.tsx`.
+- **scripts:** `package.json` with a `tsx` dependency.
+- **Accept:** `pnpm build` produces `apps/api/dist/main.js`, `apps/keeper/dist/main.js`, `apps/web/dist/index.html`; `node apps/api/dist/main.js & sleep 1; curl -s http://localhost:4000/healthz; kill %1` prints `{"ok":true}` and leaves no server on :4000.
+
+**P0-T5 Compose + env examples** · CORE · q · 1h · deps: P0-T1 · ∥
+- **`docker-compose.yml`:** `mongo:7` with `--replSet rs0`, a healthcheck that runs `rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})` once (a member named by the container hostname is unreachable from the host), port 27017, a named volume. Example `MONGODB_URI=mongodb://localhost:27017/ibt?replicaSet=rs0&directConnection=true`.
+- **`.env.example` per app:** every variable from L551–566 plus G26 vars, with placeholder values. Never put a real key in an example file.
+- **Accept:** `docker compose up -d mongo && docker compose exec mongo mongosh --quiet --eval 'rs.status().ok'` prints `1`; `mongosh "mongodb://localhost:27017/?replicaSet=rs0&directConnection=true" --quiet --eval 'db.hello().isWritablePrimary'` run from the host prints `true`; `grep -c MONGODB_URI apps/*/.env.example` ≥ 2.
+
+**P0-T6 CI workflow** · CORE · q · 1h · deps: P0-T2..T4
+- **`.github/workflows/ci.yml`:** push job runs Node 20.20, corepack pnpm, cache pnpm store and `~/.cache/mongodb-binaries`, `pnpm install --frozen-lockfile`, `lint`, `typecheck`, `test`, `build` (L570).
+- **Nightly job:** `schedule: cron '0 3 * * *'`, `DEVNET_E2E=1` running `pnpm tsx scripts/devnet-e2e.ts` only if the `DEVNET_RPC_URL` secret exists.
+- **Accept:** `npx --yes @action-validator/cli .github/workflows/ci.yml` exits 0 (fallback: a `yq` parse).
+
+**P0-T7 Gate G0 check** · CORE · q · 0.5h · deps: P0-T1..T6
+- **Accept:** `pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test && pnpm build` all exit 0.
+
+### Phase 1: `packages/shared`
+
+**P1-T1 Constants + cluster config** · CORE · q · 1h · deps: P0-T7
+- **`constants.ts`:** program IDs and addresses (L129–134, L655–663), USDC mints per cluster, `MIGRATION_THRESHOLD_SOL {devnet:1, 'mainnet-beta':10}`, `DEFAULT_SPLITS_BPS`, `HOLDER_MIN_BASE_UNITS = 1_000_000n * 10n**6n`, `HOLDER_DISCOUNT_BPS=1000`, `RATE_LIMIT_PER_MIN=60`, `MAX_TOKENS_CAP=8192`, `DEFAULT_MAX_TOKENS=1024`, `FIRST_BYTE_TIMEOUT_MS=30000`, `TOTAL_TIMEOUT_MS=300000`, `HOLD_TTL_MS=600000`, `NONCE_TTL_MS=300000`, `JWT_TTL_S=86400`, `MIN_PAYOUT_MICRO=1_000_000`, `DAILY_CAP_DEFAULT_MICRO=50_000_000`.
+- **Accept:** `pnpm --filter @ibt/shared exec vitest run test/constants.test.ts` passes; the test asserts the splits sum to 10000 and the addresses are valid base58 of length 32–44.
+
+**P1-T2 Money + pricing math (TDD)** · CORE · d · 1.5h · deps: P1-T1 · ∥ P1-T3..T5
+- **`money.ts`:** `microToUsdcString(bigint)` (6 dp), `usdcStringToMicro`, `lamportsToSol`.
+- **`pricing.ts`:** `computeCostMicro({pt,ct,inPrice,outPrice})` (G16, BigInt), `estimateHoldMicro`, `applyDiscount`.
+- **Tests:** boundary cases (1 token at 1 micro/MTok → 1; 0 tokens → 0; values above 2^53 as strings).
+- **Accept:** `pnpm --filter @ibt/shared exec vitest run test/pricing.test.ts` has ≥ 12 assertions and passes.
+
+**P1-T3 Split + conversion math (TDD)** · CORE · d · 1h · deps: P1-T1 · ∥
+- **`split.ts`:** `splitRevenue(revMicro, splits, phase)` where `phase:'none'` folds liquidity into the provider (G17) and the remainder goes to the platform; `sliceToLamports(sliceMicro, solPriceMicroUsdc)` floored.
+- **Tests:** a property test over 10k random values asserting `p+l+f===rev` and that the platform gets the remainder (L587).
+- **Accept:** `pnpm --filter @ibt/shared exec vitest run test/split.test.ts` passes.
+
+**P1-T4 Zod schemas + DTOs** · CORE · uh · 2h · deps: P1-T1 · ∥
+- **Coverage:** schemas for every request and response in L383–457.
+- **Chat:** `ChatCompletionRequest` uses `.passthrough()` and requires `model` and `messages`; `max_tokens ≤ 8192`.
+- **Common:** cursor/limit (max 100) and the error envelope.
+- **`signin.ts`:** `buildSignInMessage` (G22).
+- **Accept:** `pnpm --filter @ibt/shared exec vitest run test/schemas.test.ts` passes; the test round-trips the example payloads at L409–455.
+
+**P1-T5 AppError + error catalog** · CORE · q · 1h · deps: P1-T1 · ∥
+- **`errors.ts`:** `AppError {code,httpStatus,publicMessage,details}` plus a frozen catalog of every code in L417–426 and L436–446, plus `daily_cap_exceeded`, `deposit_pending` (202, retryable, P3-T7), `unauthorized`, `forbidden`, `not_found`, `settlement_not_retryable`, `internal`.
+- **Accept:** `pnpm --filter @ibt/shared exec vitest run test/errors.test.ts` passes; the test asserts each status from the spec table.
+
+**P1-T6 Node-only utilities (`@ibt/shared/node`)** · CORE · uh · 1.5h · deps: P1-T5
+- **`crypto.ts`:** AES-256-GCM `encrypt/decrypt` with a per-row 12-byte IV and base64 `iv|tag|data` (L297, L516).
+- **`ids.ts`:** `generateApiKey()` → `ibt_`+base58(32B), `sha256Hex`, `prefix(12)`, `generateDepositRef()` (8 base58 chars).
+- **`logger.ts`:** pino with redaction using exact paths: `req.headers.authorization`, `err.headers`, `*.apiKey`, `*.apiKeyEnc`, `MASTER_KEY`, `JWT_SECRET`, `ADMIN_TOKEN`, `*_SECRET_KEY` (expanded to each concrete `*_SECRET_KEY` env name, since pino paths don't glob on key suffixes).
+- **`alerter.ts`:** `Alerter` interface with the log transport (G27).
+- **`env.ts`:** `parseEnv(schema)`.
+- **Web import guard:** add an ESLint `no-restricted-imports` rule for `apps/web/**` banning `@ibt/shared/node`, `@ibt/db` and `@ibt/chain/testing` ("web build passes" proves nothing because web doesn't import shared yet).
+- **Accept:** `pnpm --filter @ibt/shared exec vitest run test/node.test.ts test/logger.test.ts` passes. Cases: tamper → decrypt throws; the logger redacts the bearer token; an upstream-error log record built from a request carrying a decrypted upstream key (in headers, `err.headers` and a nested `apiKey`) never contains the plaintext key. Also `pnpm lint` exits 0 and `grep -q '@ibt/shared/node' eslint.config.js`.
+
+### Phase 2: `packages/chain`
+
+**P2-T1 SDK surface verification** · CORE · d · 1h · deps: P0-T7 · ∥ Phase 1
+- **Install:** both SDKs (exact pins), web3.js, spl-token, bn.js.
+- **`src/sdk.ts`:** re-exports the needed symbols with comments listing the §4 drift.
+- **`test/sdk-surface.test.ts`:** asserts every name in §4 is `typeof 'function'` or defined; asserts `DAMM_V2_MIGRATION_FEE_ADDRESS[2].toBase58()==='Hv8Lmzmnju6m7kcokVKvwqz7QPmdX9XfKjJsXz8RXcjp'`; asserts `derivePoolAddress` is symmetric in mint order (otherwise documents the required order).
+- **Also:** confirm the Jupiter price endpoint from Jupiter docs and record it in `.env.example` (G25), including whether `JUPITER_API_KEY` is required (G26).
+- **Accept:** `pnpm --filter @ibt/chain exec vitest run test/sdk-surface.test.ts` passes; `pnpm --filter @ibt/chain exec node -e "import('@meteora-ag/dynamic-bonding-curve-sdk').then(m=>{if(typeof m.buildCurve!=='function')process.exit(1)})"` exits 0 (run inside the package; from the root, strict pnpm can't resolve the SDK); `pnpm why -r @solana/web3.js | grep -o '@solana/web3.js@1\.[0-9.]*' | sort -u | wc -l` prints `1`.
+
+**P2-T2 RPC client** · CORE · uh · 1h · deps: P2-T1
+- **`rpc.ts`:** `createRpc({primary, fallback})` exposing a `Connection` pair and `withRetry(fn)` with backoff 500/2000/8000 ms (L259) that fails over to the fallback after 2 primary errors.
+- **Tests:** use fake timers.
+- **Accept:** `pnpm --filter @ibt/chain exec vitest run test/rpc.test.ts` passes, including the "uses fallback on 3rd attempt" case.
+
+**P2-T3 `sendAndConfirm` (TDD)** · CORE · ub · 2h · deps: P2-T2, P1-T5
+- **Rules (L258):** fresh blockhash per attempt; `confirmTransaction({signature, blockhash, lastValidBlockHeight})`; on `TransactionExpiredBlockheightExceededError`, check `getSignatureStatuses` first and **return if it landed**, otherwise rebuild, re-sign and resend; max 3 attempts; extra signers (position NFT keypairs) supported; `simulate` option.
+- **`onSigned(sig, lastValidBlockHeight)` hook:** called after signing and **awaited before** `sendRawTransaction` on every attempt, so the caller persists the signature before the tx can land (closes the double-pay window, L172, L599). If `onSigned` throws, nothing is sent.
+- **Fake:** a `FakeConnection`.
+- **Accept:** `pnpm --filter @ibt/chain exec vitest run test/send.test.ts` passes these cases: success first try; expiry then success; expiry but already landed (no resend); 3 failures throw `AppError('chain_send_failed')`; `onSigned` resolves before the send call (call-order assertion); `onSigned` throwing → zero sends.
+
+**P2-T4 Deposit parser (TDD)** · CORE · ub · 2h · deps: P2-T1 · ∥ P2-T2
+- **`deposit.ts`:** `parseDeposit(parsedTx, {usdcMint, treasuryAta, depositRef})` → `{ok, amountMicro, slot}` or `{ok:false, reason}`.
+- **Checks (L519):** `meta.err===null`; an SPL `transfer` or `transferChecked` (top-level or inner) to `treasuryAta`; mint = USDC (for plain `transfer`, resolve through `postTokenBalances`); a Memo program instruction equal to `depositRef`; amount taken from the instruction, never from the client.
+- **`testing/fixtures.ts`:** `buildDepositFixture(overrides)`.
+- **Accept:** `pnpm --filter @ibt/chain exec vitest run test/deposit.test.ts` passes 8 cases (valid ×2 variants, wrong memo, wrong mint, wrong destination, failed tx, no memo, two transfers summed only to the treasury).
+
+**P2-T5 Partner config builder + snapshot** · CORE · d · 1h · deps: P2-T1 · ∥
+- **`config.ts`:** `buildPartnerConfigParams(cluster)` calls `buildCurve` with exactly the parameters at L97–113 (with the §4 drift corrections) and `migrationQuoteThreshold` 10 or 1; `buildCreateConfigTx({connection, configPubkey, treasury, cluster})`.
+- **Snapshot:** BN values serialized to strings.
+- **Accept:** `pnpm --filter @ibt/chain exec vitest run test/config.test.ts` passes. A committed `__snapshots__/config.test.ts.snap` exists for both clusters, and explicit assertions check `creatorTradingFeePercentage===50`, `migrationFeeOption===2`, `poolCreationFee` 0, and the locked LP percentages 50/50.
+
+**P2-T6 DBC wrapper** · CORE · ub · 2h · deps: P2-T3, P2-T5, P1-T5
+- **`dbc.ts`:**
+  - `readPool(mint|pool)` → normalized DTO (string base units, `progress = quoteReserve/migrationQuoteThreshold`, `isMigrated`);
+  - `verifyLaunch({signature, mint, expectedConfig, expectedCreator})`: tx succeeded, `deriveDbcPoolAddress(NATIVE_MINT, mint, config)` exists, `pool.config===ours`, `pool.creator===owner` (L122, L524);
+  - `quoteBuy(pool, lamports)` via `swapQuote2` PartialFill (L123);
+  - `buildCurveBuyTx(keeper, pool, lamports, minOut)`;
+  - `buildMigrateTx(keeper, pool)` returning the tx plus 2 NFT signers;
+  - `feeMetrics(pool)`.
+- **Tests:** pure functions run on JSON fixtures of `VirtualPool`/`PoolConfig`. SDK builders fetch accounts through `Connection`, so builder tests either assert the SDK-call parameters with `vi.spyOn(client.pool, 'swap2')` etc., or stub `getAccountInfo`/`getMultipleAccountsInfo` to return encoded fixture accounts. No RPC is ever contacted.
+- **Accept:** `pnpm --filter @ibt/chain exec vitest run test/dbc.test.ts` passes (progress math, verifyLaunch mismatch → `pool_mismatch`, `buildCurveBuyTx`/`buildMigrateTx` call the SDK with the expected params).
+
+**P2-T7 DAMM v2 wrapper** · CORE · ub · 2h · deps: P2-T3 · ∥ P2-T6
+- **`damm.ts`:** `deriveDammPool(mint)` (fee config `Hv8L…`, base mint, WSOL; ordering per P2-T1), `readDammPool`, `quoteSwap` (`getQuote2`), `depositQuote` (`getDepositQuote`), `buildCreatePositionAndAdd`, `buildAddLiquidity`, `buildPermanentLock`, `buildClaimPositionFee`, `buildSwap`.
+- **WSOL:** wrap and unwrap are handled internally.
+- **Tests:** same approach as P2-T6: `vi.spyOn` on the cp-amm SDK methods, or `getAccountInfo`/`getMultipleAccountsInfo` stubbed with encoded fixture accounts; no RPC.
+- **Accept:** `pnpm --filter @ibt/chain exec vitest run test/damm.test.ts` passes (derivation is deterministic; the builders call the SDK with the expected params and produce transactions with the expected program id `cpamdp…` on a stubbed fixture pool state).
+
+**P2-T8 ChainClient + Fake + SPL + price** · CORE · d · 2h · deps: P2-T4, P2-T6, P2-T7
+- **`client.ts`:** `ChainClient` interface used by api and keeper: `getParsedTx`, `verifyDeposit`, `verifyLaunch`, `readPool`, `readDammPool`, `tokenBalance(wallet,mint)`, `solBalance`, `usdcBalance`, `transferUsdc(from,toWallet,amount)` (creates the ATA idempotently, L176), `curveBuy`, `migrate`, `dammSwap`, `addAndLock`, `claimPositionFee`, `signatureStatus`. Every sending method takes `{onSigned}` and passes it to `sendAndConfirm` (P2-T3). `RealChainClient` composes P2-T2..T7.
+- **`price.ts`:** `JupiterPriceSource` (sends `JUPITER_API_KEY` as a header when set) and `FakePriceSource`.
+- **`testing/fake-chain.ts`:** in-memory pools, balances and signatures; `failNext(method, n)`; `crashAfter(method)`; `crashAfterLand(method)` (the tx is recorded as landed, then the call throws before returning, simulating a crash between landing and persist); `migrateWhen(threshold)`; every call is recorded for assertions; `onSigned` is invoked before a tx "lands".
+- **Optional persistence:** `createFakeChain({ mongo?: Connection })`. When a Mongo connection is passed, every landed tx (`{signature, method, from, to, amount, mint, settlementRef, ts}`) is also written to the `fakeChainTxs` collection through `connection.collection('fakeChainTxs')`, and `signatureStatus` reads from it, so state survives a process SIGKILL. `@ibt/chain` takes the connection as a structural type only (no `mongoose` dependency, G11).
+- **Accept:** `pnpm --filter @ibt/chain exec vitest run test/fake-chain.test.ts` passes (including persistence against an in-memory stub of `collection()`: insert on land, `signatureStatus` answered from the stored rows by a fresh fake instance); `pnpm --filter @ibt/chain typecheck` exits 0.
+
+### Phase 3: `packages/db` + `apps/api` core
+
+**P3-T1 Mongoose models + indexes** · CORE · uh · 2h · deps: P1-T4
+- **Collections:** all 11 (L266–368 plus G13), with the extra fields from G14, G15, G18–G21, plus `token.status:'pending'` (set by `/launch/prepare`, P5-T1), `upstream.supportsStreamUsage` (G28) and `settlements.pendingTx` (G20).
+- **Indexes:**
+  - users: `wallet` (u), `depositRef` (u)
+  - apiKeys: `keyHash` (u), `(userId,createdAt)`
+  - models: `slug` (u), `token.mint` (u, `partialFilterExpression: {'token.mint': {$type: 'string'}}`, not sparse), `providerId`
+  - requests: `requestId` (u), `createdAt` TTL 90 d, `(modelId,settlementId,createdAt)`, `(userId,createdAt)`, partial `(userId,idempotencyKey)` **non-unique** (rows live 90 days; a key may be reused after 24 h)
+  - ledger: `(userId,createdAt)`, `(type,status,expiresAt)`
+  - deposits: `txSignature` (u)
+  - settlements: `(modelId,periodStart)` (u), `(state,updatedAt)`
+  - poolSnapshots: `(modelId,ts)`, `ts` TTL 30 d
+  - nonces: `expiresAt` TTL
+  - idempotency: `(userId,key)` (u); separate single-field `createdAt` TTL index (24 h)
+  - leases: `expiresAt` TTL
+- **`connect.ts`:** `connectDb(uri)`; `index.ts` re-exports `mongoose`'s connection, all models and `syncAllIndexes()` (calls `syncIndexes()` on every model) so api, keeper and scripts never import `mongoose` directly (G11).
+- **Accept:** `pnpm --filter @ibt/db exec vitest run test/indexes.test.ts` passes; the test runs `syncIndexes()` and asserts every index above by key spec and options (including `unique` absent on `requests.(userId,idempotencyKey)` and the partial filter on `token.mint`); `grep -L '"mongoose"' apps/api/package.json apps/keeper/package.json` lists both files.
+
+**P3-T2 API app factory + middleware + harness** · CORE · uh · 2h · deps: P1-T6, P3-T1, P2-T8
+- **`app.ts`:** `createApp({env, chain, alerter, clock})`.
+- **Proxy:** `app.set('trust proxy', env.TRUST_PROXY)` (default `1`, G26) so IP rate limits and `ADMIN_IP_ALLOWLIST` see the client IP on Railway and express-rate-limit doesn't throw on `X-Forwarded-For` (L230, L523).
+- **Middleware order:** requestId (echo or generate, L407) → pino-http (L257 fields) → helmet → cors (`WEB_ORIGIN` only) → json limit 1 MB (L522).
+- **Routes:** `/healthz`, `/readyz` (Mongo ping plus `chain.ping`, L529); 404; error handler (envelope `{error:{code,message,requestId}}`, no stack, L260); `main.ts` with graceful shutdown.
+- **`env.ts`:** the api env schema **rejects** startup when `KEEPER_SECRET_KEY` or `TREASURY_SECRET_KEY` is present (L190); `CHAIN_MODE=fake` is refused unless the `MONGODB_URI` host is localhost/127.0.0.1 (G24).
+- **`test/helpers.ts`:** `makeTestApp()` with MongoMemoryReplSet and FakeChainClient; calls `syncAllIndexes()` before any test transaction.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/app.int.test.ts test/env.test.ts` passes (the X-Request-Id header is present; an unknown route returns 404 with the envelope; a thrown error leaks no stack; `X-Forwarded-For` is honoured for `req.ip`; env with `TREASURY_SECRET_KEY` set fails to parse).
+
+**P3-T3 Auth module** · CORE · uh · 1.5h · deps: P3-T2 · ∥ P3-T4, P3-T5
+- **Endpoints:** `POST /api/auth/nonce`, `POST /api/auth/verify` (L223, L518): random nonce, single use, 5-minute expiry; `tweetnacl.sign.detached.verify` over `buildSignInMessage`; upsert the user with a new `depositRef`; jose HS256 24 h JWT `{userId, wallet, role}`.
+- **Also:** `jwtAuth` middleware; rate limit on auth routes (10/min/IP).
+- **Tests:** use an ephemeral `nacl.sign.keyPair()`.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/auth.int.test.ts` passes (valid → token; replayed nonce → 401; expired → 401; wrong wallet signature → 401).
+
+**P3-T4 API keys + key auth** · CORE · uh · 1.5h · deps: P3-T3
+- **Endpoints:** `GET/POST/DELETE /api/keys` (L224, L390, L497); `GET` takes `?cursor=&limit=` (limit ≤ 100, opaque cursor, L457); `POST` returns the full key once, stores only the SHA-256, `prefix(12)` and `dailyCapMicroUsdc`.
+- **`apiKeyAuth`:** hashes the bearer key, loads key and user, revoked → 401 `invalid_api_key`, updates `lastUsedAt` (throttled).
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/keys.int.test.ts` passes (the full key appears exactly once; the list never contains it; a revoked key gets 401 on `/v1/models`; 3 keys with `limit=2` → 2 items plus a cursor that returns the third).
+
+**P3-T5 Models module** · CORE · uh · 2h · deps: P3-T3 · ∥ P3-T4
+- **Endpoints:** `GET /api/models?cursor=&limit=` (limit ≤ 100, L457), `GET /api/models/:slug` (public, includes `stats` and `token`), `POST /api/models` (sets the role to provider, encrypts the upstream key), `PATCH /api/models/:id` (owner only; `PATCH` replaces the key, never reads it back, L516; also accepts `status: 'active'|'paused'` for the provider pause/resume UI, L483, and resuming resets `health.consecutiveFailures` to 0).
+- **Rule:** `upstream.apiKeyEnc` is stripped from every response through a schema transform.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/models.int.test.ts` passes; the test greps every response body for `apiKeyEnc` and the plaintext key and finds neither; owner pause → `status:'paused'`, resume → `active` with `consecutiveFailures:0`, non-owner → 403; pagination returns a cursor.
+
+**P3-T6 Ledger service (TDD)** · CORE · ub · 2h · deps: P3-T1, P1-T2, P1-T5
+- **Location:** `packages/db/src/ledger.ts`, exported from `@ibt/db` so the api (P3-T7, P4-T4), the keeper (P6-T7, P6-T8) and scripts (P8-T2) all import the same service. Tests run in `@ibt/db` with the P0-T3 global `MongoMemoryReplSet` setup, so this task does **not** depend on the api harness (P3-T2). All multi-doc writes use `session.withTransaction`; tests call `syncAllIndexes()` first.
+- **`ledger.ts`:**
+  - `hold(userId, est)` (G14: conditional `$inc heldMicroUsdc`, fails with 402 and `shortfallUsdc`);
+  - `capture(holdId, cost, requestDoc)` (session: close the hold, `$inc balance −cost, held −est`, insert the capture row with `balanceAfter`, insert the request);
+  - `release(holdId)`;
+  - `expireHolds(now)`;
+  - `credit(userId, amount, ref)`;
+  - `adjust`;
+  - `recomputeBalance(userId)` (L372).
+- **Accept:** `pnpm --filter @ibt/db exec vitest run test/ledger.test.ts` passes. Cases: all transitions; double capture is a no-op; 50 concurrent holds against a balance of 10 holds never let `balance−held` go below 0.
+
+**P3-T7 Billing endpoints + `/api/me`** · CORE · uh · 2h · deps: P3-T6, P3-T4
+- **`POST /api/billing/deposits`:** `chain.getParsedTx(sig, 'finalized')` → `parseDeposit` → credit (via `@ibt/db` ledger). Errors: 409 `deposit_already_credited` (unique signature), 422 `deposit_invalid` (rejected row stored with the reason), rate-limited (L395, L432–437, L519).
+- **Not finalized yet:** if `getParsedTx(sig,'finalized')` returns null but the signature is known at `confirmed`, return retryable **202 `deposit_pending`** with no `rejected` row, so it doesn't count toward the "rejected > 5/h" alert (L519). The client polls (P7-T6).
+- **Other endpoints:** `GET /api/billing/ledger?cursor=` (opaque base64 cursor, limit ≤ 100), `GET /api/billing/usage?from=&to=` (aggregated per model per day), `GET /api/me` (profile, balance, held, depositRef).
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/billing.int.test.ts` passes (credit → 200 `{credited:true, amountUsdc:"25.000000"}`; replay → 409; wrong memo → 422 and a `rejected` row plus a log line; confirmed-but-not-finalized → 202 `deposit_pending` and zero `rejected` rows, then 200 once the fake finalizes it).
+
+### Phase 4: Gateway
+
+**P4-T1 Mock upstream** · CORE · q · 1.5h · deps: P0-T3
+- **Modes** (set by `x-mock-mode` header or model name suffix): `ok`, `stream`, `error500`, `slow-first-byte`, `slow-stream`, `no-usage`, `malformed`, `stream-no-done`.
+- **`createMockUpstream({port})`:** returns `{url, close, calls}`; `main.ts` serves on `MOCK_UPSTREAM_PORT=4010`; checks the `Authorization` header.
+- **Accept:** `pnpm --filter @ibt/mock-upstream test` passes; `pnpm --filter @ibt/mock-upstream start & sleep 1; curl -s http://localhost:4010/v1/chat/completions -H 'Content-Type: application/json' -H 'Authorization: Bearer test' -d '{"model":"m","messages":[]}'; kill %1` prints JSON with `usage`.
+
+**P4-T2 Token counting** · CORE · q · 1h · deps: P1-T2 · ∥ P4-T1
+- **`gateway/tokenCount.ts`:** lazy `cl100k_base` singleton; counts messages (role and content, including array content parts); `count(text)`; never frees the shared encoder per call.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/tokenCount.test.ts` passes ("Hello" → known count; 1k calls construct the encoder exactly once, asserted with `vi.spyOn` on the tiktoken factory; no heap-growth assertion, it's flaky).
+
+**P4-T3 `/v1/models` + resolve + validation** · CORE · uh · 1h · deps: P3-T4, P3-T5
+- **Behaviour:** `GET /v1/models` returns OpenAI list format with prices (L386); resolve the slug (404 `model_not_found`, 503 `model_paused`); zod 400 `invalid_request`; enforce the `max_tokens` cap.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/gateway-resolve.int.test.ts` passes.
+
+**P4-T4 Non-streaming chat completions** · CORE · ub · 2h · deps: P4-T1..T3, P3-T6
+- **Flow** (L232–239): estimate (L236) → hold → undici `request` to `baseUrl/chat/completions` with the upstream model name and decrypted key (`headersTimeout:30000`, `bodyTimeout` plus an overall `AbortSignal.timeout(300000)`) → validate the `choices` array → usage or tiktoken (L147) → capture → headers `X-Request-Id`, `X-Cost-Usdc`, `X-Balance-Usdc`, `X-Discount-Bps` (L415).
+- **Injectable timeouts:** `createApp` takes `timeouts: {firstByteMs, totalMs}` defaulting to `FIRST_BYTE_TIMEOUT_MS`/`TOTAL_TIMEOUT_MS`; tests pass ~100 ms so they never wait 30 s.
+- **Failures:** non-2xx or malformed → release and 502; timeout → release and 504; each writes a request doc with status `upstream_error`/`timeout`.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/gateway.int.test.ts` passes (supertest against `makeTestApp()` plus `createMockUpstream()`): happy path with `X-Cost-Usdc` and hold + capture rows in `GET /api/billing/ledger`, 402 with `shortfallUsdc`, upstream 500 not billed, timeout releases (injected 100 ms timeout), revoked key, and usage-estimated cases. No live curl here: nothing is seeded until P8-T2; the live curl runs in P9-T1.
+
+**P4-T5 Rate limit + daily cap** · CORE · uh · 1h · deps: P4-T4
+- **Rate limit:** express-rate-limit keyed by `keyHash`, 60/min, 429 `rate_limited` with the envelope (L423).
+- **Daily cap:** sum of today's (UTC) captured cost per key from `requests` (index-backed), checked before the hold, 429 `daily_cap_exceeded` (G21).
+- **Overrides:** both limits read optional env overrides `RATE_LIMIT_PER_MIN` / `DAILY_CAP_USDC` (wired in P8-T6, G26); the shared constants stay the defaults.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/limits.int.test.ts` passes (the 61st request gets 429; a cap of 1 USDC is hit after N requests).
+
+**P4-T6 Streaming pass-through** · **CUT** · ub · 2h · deps: P4-T4
+- **Behaviour** (L238, L415): send the cost headers (hold estimate) before the first chunk; pipe the undici body to `res` with back-pressure (`pipeline`); tee to an SSE parser; detect `[DONE]`; read final usage or tiktoken over the concatenated deltas; capture after the end. `stream_options.include_usage` is sent only when `upstream.supportsStreamUsage` is true (G28).
+- **Failure handling:** a missing `[DONE]` → release with `upstream_error`; client disconnect → abort upstream, release, `client_abort`; 300 s total → 504 or stream end with release.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/streaming.int.test.ts` passes (the bytes match the mock exactly; `[DONE]` present → captured; no-done → released; abort → released; flag off → no `stream_options` in the upstream body).
+
+**P4-T7 Idempotency keys** · **CUT** · uh · 1.5h · deps: P4-T4
+- **Behaviour** (L148): `Idempotency-Key` → insert `{userId,key,state:'in_flight'}` (a unique conflict on an in-flight key returns 409 `idempotency_in_progress`); on completion store status, headers and body; a replay returns the stored response with `Idempotency-Replayed: true` and is never billed. Streaming plus a key is replayed as the stored assembled JSON.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/idempotency.int.test.ts` passes (2 identical calls → 1 capture row).
+
+**P4-T8 Holder discount** · **CUT** · uh · 1h · deps: P4-T4, P2-T8
+- **Behaviour** (L186, L241): `chain.tokenBalance(user.wallet, model.token.mint)` cached in a 5-minute TTL map keyed by `wallet:mint`; ≥ `HOLDER_MIN_BASE_UNITS` → 1000 bps; `discountBps` stored on the request; RPC failure → no discount, no error.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/discount.int.test.ts` passes (cost is 90%; 2 calls → 1 RPC read; at 5 min + 1 s → re-read).
+
+### Phase 5: Tokens, metadata, admin
+
+**P5-T1 Launch prepare + confirm** · CORE · d · 2h · deps: P3-T5, P2-T8
+- **`POST /api/tokens/launch/prepare {modelId, mint}`** (L122): owner only, called **before** the wallet signs; stores `token.{status:'pending', mint}` so `/metadata/<mint>.json` resolves before any indexer fetches the immutable URI (P5-T3). Re-preparing with a new mint replaces a still-pending one; a model already on `curve`/`graduated` → 409.
+- **`POST /api/tokens/launch/confirm`** (L398, L440–446): owner only; the mint must equal the prepared one; `chain.verifyLaunch` → sets `token.{status:'curve', mint, dbcPool, launchSignature}`; 422 `pool_mismatch` with a message; idempotent if already launched with the same mint.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/launch.int.test.ts` passes (prepare → `token.status:'pending'` and metadata 200 for that mint; good confirm → 200 `{token:{status:"curve",progress:0}}`; wrong creator → 422; wrong config → 422; non-owner → 403; confirm with an unprepared mint → 422).
+
+**P5-T2 Token state / quote / settlements** · CORE · uh · 1.5h · deps: P5-T1, P3-T1
+- **`GET /api/tokens/:mint/state`:** latest `poolSnapshots` row plus `stats`, with the shape at L452–454.
+- **`GET /api/tokens/:mint/quote?side=&amount=`:** curve → dbc quote; graduated → damm quote.
+- **`GET /api/tokens/:mint/settlements?cursor=`:** public settlement ledger.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/tokens.int.test.ts` passes (state matches the shape; quote mirror equals the chain fake's value).
+
+**P5-T3 Metadata + health-check service** · CORE · uh · 1.5h · deps: P3-T5 · ∥ P5-T1
+- **Metadata:** `GET /metadata/:file` (strip `.json`; Metaplex JSON with name, symbol, description, image, `external_url`, `attributes:[{trait_type:'model', value: slug}]`, L229). Serves any model whose `token.mint` matches, **including `token.status:'pending'`** (set by `/launch/prepare`, P5-T1), so the URI never 404s once the wallet signs.
+- **Health check:** `models/health.ts` sends one `max_tokens:1` completion and updates `health.lastOkAt/p50LatencyMs/consecutiveFailures`; the 3rd failure sets `status:'paused'` and alerts (L250); `POST /api/models/:id/health-check` (owner).
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/metadata.int.test.ts test/health.int.test.ts` passes (a pending mint returns 200 JSON; an unknown mint returns 404).
+
+**P5-T4 Admin module** · CORE · uh · 1.5h · deps: P5-T3, P3-T1
+- **`adminAuth`:** bearer `ADMIN_TOKEN` (constant-time compare) plus `ADMIN_IP_ALLOWLIST` (L230).
+- **Endpoints:**
+  - `POST /api/admin/settlements/:id/retry`: `failed` → state = `lastCompletedState`, `attempts=0`; otherwise 409.
+  - `POST /api/admin/models/:id/pause`
+  - `GET /api/admin/float`: keeper SOL vs `FLOAT_MIN_SOL`, treasury USDC vs next expected payout.
+  - `POST /api/admin/health-checks/run` (G12).
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/admin.int.test.ts` passes (wrong token → 401; disallowed IP → 403).
+
+**P5-T5 API alerts** · CORE · q · 1h · deps: P5-T4, P1-T6
+- **Rolling counters:** 5xx rate > 2% over 5 minutes → alert; deposits rejected > 5 per hour → alert; model paused → alert (L530). All go through `Alerter`.
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/alerts.test.ts` passes using a fake clock and a fake alerter.
+
+### Phase 6: `apps/keeper`
+
+**P6-T1 Keeper shell + lease** · CORE · uh · 1.5h · deps: P3-T1, P2-T8
+- **Setup:** `env.ts`, `main.ts`, `/healthz` on `KEEPER_PORT`.
+- **`lease.ts`:** `leases` doc `{_id:'keeper', holder, expiresAt}` with a 90 s TTL, renewed every 30 s through a conditional `findOneAndUpdate`; losing the lease stops all jobs (L253). TTL and renew interval are injectable (`createLease({ttlMs, renewMs, clock})`) so tests use ~200 ms instead of 90 s.
+- **`scheduler.ts`:** node-cron wrappers with a per-job overlap guard.
+- **`cli/settle-once.ts`:** `--chain fake|real --period-start ISO`. Package script `settle:once` = `tsx --env-file=.env --conditions=development src/cli/settle-once.ts` (nothing else loads `.env`).
+- **Keeper test harness:** `test/setup.ts` (vitest globalSetup starting `MongoMemoryReplSet`, same as P0-T3) and `test/helpers.ts` (`makeKeeperCtx()` → db connection from `@ibt/db` with `syncAllIndexes()`, `FakeChainClient` persisting to that connection, `FakePriceSource`, fake clock, fake alerter).
+- **Accept:** `pnpm --filter @ibt/keeper exec vitest run test/lease.test.ts` passes (2 instances → 1 runs; after a holder crash, takeover happens after the injected TTL).
+
+**P6-T2 poolPoller + migrationCrank** · CORE · d · 2h · deps: P6-T1
+- **Every 15 s** (L247–248): for each `curve`/`graduated` model, read the pool, write a snapshot (reserves, sqrtPrice, progress, `priceSolPerToken`, `totalTradingQuoteFee`, `isMigrated`).
+- **Curve complete and `isMigrated=0`:** `chain.migrate` (with NFT signers), store `token.migrationSignature`.
+- **`isMigrated` flips:** derive the DAMM v2 pool, confirm it by reading, set `token.status='graduated'` and `dammV2Pool`.
+- **Accept:** `pnpm --filter @ibt/keeper exec vitest run test/jobs.poolPoller.test.ts` passes (snapshot written; complete → 1 migrate call even across 2 ticks; flip → graduated).
+
+**P6-T3 Settlement steps 1–3** · CORE · ub · 2h · deps: P6-T1, P1-T3
+- **`period.ts`:** `[H-1, H)` in UTC (L172).
+- **`steps.ts`:**
+  - `lease` (insert `computing`; a duplicate-key error means another runner owns it);
+  - `tagAndSum` (session: `updateMany {modelId, status:'success', settlementId:null, createdAt < periodEnd}` → `$set settlementId`, then aggregate by `settlementId`, L172, L175). Filtering on `createdAt < periodEnd` instead of `createdAt∈period` sweeps requests orphaned by missed hours into the next run;
+  - **zero revenue:** `rev = 0` → `state:'done'` with phase `none` and no chain calls (keeps the L375 invariant);
+  - `split`;
+  - `payProvider` (accrued = share + carry; ≥ 1 USDC and ≤ cap → `transferUsdc` from treasury, store the signature, set carry to 0, `state:'paid_provider'`; otherwise update the carry, L176).
+- **Persist-before-send:** every chain call passes `onSigned` (P2-T3), which writes `settlements.pendingTx {step, signature, lastValidBlockHeight}` before sending (G20). On resume, a step with a stored `pendingTx` first calls `chain.signatureStatus(signature)`: landed → record the signature and advance without resending; not landed and blockhash expired → clear `pendingTx` and rebuild; otherwise wait and re-check.
+- **Accept:** `pnpm --filter @ibt/keeper exec vitest run test/settlement.steps1.test.ts` passes (includes: a request from 2 periods ago with `settlementId:null` gets tagged; zero-revenue period → `done`/`none` with zero fake-chain calls; stored landed `pendingTx` on `payProvider` → no second transfer).
+
+**P6-T4 Settlement steps 4–5** · CORE · ub · 2h · deps: P6-T3, P6-T2
+- **`convert`:** read the price, store the rate, compute lamports = slice + `sliceCarryOver` + `pendingCompoundLamports`, cap at `MAX_SLICE_SOL_PER_RUN` (excess carries over), `state:'converted'`. **Dust:** if the slice floors to 0 lamports, add the slice to `token.sliceCarryOverMicroUsdc`, skip `buyAndLock` and finish the run (L375 invariant holds).
+- **`buyAndLock`** (re-reads the phase at this step):
+  - none → skip;
+  - curve → `curveBuy` PartialFill, add bought tokens to `escrowBaseUnits`, `state:'bought'`; if the curve is now complete → `migrate` in the same run (L178);
+  - graduated → pair escrow with SOL first; once escrow is empty, swap half on DAMM v2; `createPositionAndAddLiquidity` once (store `keeperPosition`) or `addLiquidity`, then `permanentLockPosition`; store every signature; `state:'locked'` (L168, L178).
+- **Resume:** every send in these steps uses the same `onSigned` → `pendingTx` → `signatureStatus` check as P6-T3 before rebuilding.
+- **Accept:** `pnpm --filter @ibt/keeper exec vitest run test/settlement.steps2.test.ts` passes (includes: dust slice → `sliceCarryOverMicroUsdc` grows and zero buy calls; stored landed `pendingTx` on `curveBuy` → no second buy).
+
+**P6-T5 Settlement 6–7, retries, orchestrator** · CORE · ub · 2h · deps: P6-T4
+- **`compound`:** `claimPositionFee` → lamports go to `pendingCompoundLamports`, and any base-token fees go to `escrowBaseUnits` (L127); store `claimTxSignature`.
+- **`finalize`:** `state:'done'`.
+- **`engine.ts`:** runs from `lastCompletedState`; each step retries 3× with backoff on RPC or blockhash errors, then `failed` with `error` and an alert (L182); Mongo writes per step in `session.withTransaction`; honours `pendingTx` resume (P6-T3).
+- **`orchestrator.ts`:** all models with concurrency 3 (L249), cron `SETTLEMENT_CRON`. **Resume scan:** at boot and at the start of every run, find settlements whose state is not `done`/`failed` (including ones an admin re-queued through `/retry`, P5-T4) and drive each through `engine` from `lastCompletedState` before opening new periods (L172, L182, L525, L599).
+- **Accept:** `pnpm --filter @ibt/keeper exec vitest run test/settlement.engine.test.ts` passes (includes: a settlement left in `paid_provider` from an earlier run is finished on boot; an admin-retried `failed` settlement is executed on the next run; base fees from `claimPositionFee` land in `escrowBaseUnits`); `cp apps/keeper/.env.example apps/keeper/.env && docker compose up -d mongo && pnpm --filter @ibt/keeper settle:once -- --chain fake` prints a JSON summary (`settle:once` loads env with `tsx --env-file`, P6-T1).
+
+**P6-T6 Settlement test suite** · CORE · ub · 2h · deps: P6-T5
+- **Covers L589:** each transition; `crashAfter` each of the 7 steps → re-run → exactly one provider transfer and one buy (asserted on fake call logs); carry-over below 1 USDC across 2 periods; `maxSliceSolPerRun` cap; curve → graduated switch between convert and buy; no-token phase gives 90/10; second concurrent runner fails fast; invariant L375 checked on every `done` doc; **crash between landing and persist** (`crashAfterLand` on `transferUsdc` and on `curveBuy` → re-run → `signatureStatus` finds the landed tx through `pendingTx`, exactly one transfer/buy in the fake call log); zero-revenue period; dust slice; orphaned request from a missed hour.
+- **Accept:** `pnpm --filter @ibt/keeper exec vitest run test/settlement.suite.test.ts` passes with ≥ 15 tests.
+
+**P6-T7 healthCheck / floatMonitor / holdExpiry / stats jobs** · CORE · uh · 1.5h · deps: P6-T1, P5-T4, P3-T6
+- **healthCheck:** every 60 s, calls the api endpoint (G12).
+- **floatMonitor:** every 5 min (L251).
+- **holdExpiry:** every 60 s, `expireHolds` imported from `@ibt/db` (P3-T6).
+- **stats:** every 5 min, rolling 24 h requests, successRate, revenue, lockedLiquiditySol into `models.stats` (L308). `lockedLiquiditySol` = sum of SOL added to the locked position across all `done` settlements for the model (`settlements.liquidity.solAddedLamports`, L308, L454).
+- **Accept:** `pnpm --filter @ibt/keeper exec vitest run test/jobs.periodic.test.ts` passes (includes: 2 settlements adding 0.3 and 0.2 SOL → `lockedLiquiditySol:"0.5"`).
+
+**P6-T8 Nightly reconciliation** · CORE · uh · 1.5h · deps: P6-T5, P3-T6
+- **Ledger:** sum per user vs `balanceMicroUsdc` → log drift and fix through `recomputeBalance` imported from `@ibt/db` (P3-T6).
+- **Signatures:** every settlement signature from the last 48 h → `signatureStatus` must be success, otherwise alert (L531).
+- **Accept:** `pnpm --filter @ibt/keeper exec vitest run test/jobs.reconcile.test.ts` passes (injected drift is detected and fixed; a failed signature raises an alert).
+
+**P6-T9 Telegram transport** · **CUT** · q · 1h · deps: P1-T6
+- **`shared/node/telegram.ts`:** undici POST `sendMessage`; when `TELEGRAM_*` is unset, use the log transport; transport failures are logged and swallowed.
+- **Accept:** `pnpm --filter @ibt/shared exec vitest run test/telegram.test.ts` passes (mocked with undici `MockAgent`).
+
+### Phase 7: `apps/web` (all load `frontend-ui-ux`)
+
+**P7-T1 Web shell** · CORE · ve · 2h · deps: P1-T4, P0-T4
+- **Vite:** `nodePolyfills({include:['buffer','process'], globals:{Buffer:true,process:true}})`. Start with `buffer` + `process` only; `crypto`/`stream` pull in crypto-browserify and often break the build. Add more only if the SDK import below fails.
+- **SDK smoke import:** `src/lib/sdkSmoke.ts` imports `DynamicBondingCurveClient` from `@meteora-ag/dynamic-bonding-curve-sdk` and `CpAmm` from `@meteora-ag/cp-amm-sdk` and is referenced from `main.tsx`, so polyfill failures show up in wave 6, not at P7-T5.
+- **Styling and routing:** Tailwind 3; router with the 6 routes (L477–484); `QueryProvider`.
+- **Wallets:** `ConnectionProvider`/`WalletProvider` with Phantom and Solflare adapters plus Wallet Standard auto-detect (Backpack).
+- **`env.ts`:** zod over `VITE_*` (L507).
+- **`lib/api.ts`:** fetch with the in-memory JWT.
+- **Also:** `Layout`, `queryKeys.ts` (L502), `format.ts` (base units → decimals, no floats, L504).
+- **Accept:** `pnpm --filter @ibt/web build` exits 0 with the DBC and cp-amm SDK imports in the bundle (`grep -rlq 'dynamic-bonding-curve\|cpamdp' apps/web/dist/assets`); `pnpm --filter @ibt/web exec vitest run src/lib/format.test.ts` passes; `pnpm why -r @solana/web3.js | grep -o '@solana/web3.js@1\.[0-9.]*' | sort -u | wc -l` prints `1`.
+
+**P7-T2 WalletGate + useSendTx** · CORE · ve · 2h · deps: P7-T1
+- **`WalletGate`:** nonce → `signMessage` → verify; JWT in a module-level store, never `localStorage` (L490); public pages work without a wallet (L505).
+- **`useSendTx`:** build → simulate → sign → send → confirm with `lastValidBlockHeight` → `onConfirmed` → invalidate the queries; error mapper for wallet rejection, slippage and blockhash expiry (L503).
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/components/WalletGate.test.tsx src/hooks/useSendTx.test.ts` passes; `grep -r localStorage apps/web/src` finds nothing.
+
+**P7-T3 Explore + CurveProgress + ModelCard** · CORE · ve · 1.5h · deps: P7-T1 · ∥ P7-T2
+- **Content:** model cards (L479); `CurveProgress` polls every 10 s, showing SOL raised vs threshold.
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/pages/Explore.test.tsx src/components/CurveProgress.test.tsx` passes (renders progress 42% from a fixture).
+
+**P7-T4 Token page + ModelStats + SettlementTable** · CORE · ve · 1.5h · deps: P7-T3
+- **Content:** L480, L494–495; Solscan links include `?cluster=devnet` when needed; settlements refetch every 60 s.
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/components/SettlementTable.test.tsx src/components/ModelStats.test.tsx` passes (link href correct per cluster).
+
+**P7-T5 TradePanel** · CORE · ve · 2h · deps: P7-T2, P7-T4
+- **Curve:** `swapQuote2` + `swap2` (DBC). **Graduated:** `getQuote2` + `swap2` (cp-amm). Slippage selector, price impact, min received, 0.01 SOL fee note (L123, L492).
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/components/TradePanel.test.tsx` passes (quote rendering for both phases with mocked SDK).
+
+**P7-T6 Dashboard: ApiKeyManager + DepositUsdc** · CORE · ve · 2h · deps: P7-T2
+- **Content:** L482, L491, L497. Deposit = USDC `transferChecked` to `VITE_TREASURY_USDC_ATA` plus a Memo instruction with `depositRef` → `POST /api/billing/deposits`; states idle → signing → pending → credited or error. A 202 `deposit_pending` keeps the `pending` state and re-posts every 5 s (up to ~2 min) until 200 or a non-retryable error (P3-T7). Also: usage table and quickstart snippet.
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/components/DepositUsdc.test.tsx src/components/ApiKeyManager.test.tsx` passes (all states; 202 then 200 → credited after polling with fake timers; the key is shown once).
+
+**P7-T7 LaunchWizard** · CORE · ve · 2h · deps: P7-T2
+- **Four steps** (L481, L496): register → health check → prices → launch (generate the mint keypair, `POST /api/tokens/launch/prepare {modelId, mint}` **before** signing so the metadata URI resolves (P5-T1), `createPool` with uri `${VITE_API_URL}/metadata/${mint}.json`, partial-sign with the mint, wallet signs, then `/launch/confirm`).
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/components/LaunchWizard.test.tsx` passes (validation errors on bad URL, prices and symbol; step gating; `prepare` is called before the wallet `signTransaction` mock).
+
+**P7-T8 Provider page + ClaimFees** · CORE · ve · 1.5h · deps: P7-T2, P7-T4
+- **Content:** L483, L498. Creator: `claimCreatorTradingFee` + `claimPositionFee`. Platform (treasury wallet): `claimPartnerTradingFee`. Pause/resume through `PATCH /api/models/:id {status}` (P3-T5). ClaimFees also appears owner-only on the token page.
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/components/ClaimFees.test.tsx` passes (correct builder chosen per role).
+
+**P7-T9 Docs page** · CORE · ve · 1h · deps: P7-T1
+- **Content:** L484. OpenAI SDK `baseURL` swap examples (JS and Python), curl, streaming, error table.
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/pages/Docs.test.tsx` passes (contains `baseURL` and `/v1/chat/completions`).
+
+**P7-T10 Price chart** · **CUT** · ve · 1h · deps: P7-T4
+- **`PriceChart`:** lightweight-charts v5 line chart from snapshots; progress bar stays as the fallback (L625).
+- **Accept:** `pnpm --filter @ibt/web exec vitest run src/components/PriceChart.test.tsx` passes (mocks the canvas).
+
+**P7-T11 Playwright** · CORE · ve · 1h · deps: P7-T3, P7-T9 · skills: `frontend-ui-ux`, `playwright`
+- **Setup:** `playwright.config.ts` (webServer `vite preview`); `e2e/smoke.spec.ts` stubs every `${VITE_API_URL}/**` request with `page.route` (fixture JSON for `/api/models` etc.), since no api runs under `vite preview`, then checks that `/` and `/docs` render with no console errors; the `@staging` flow is skipped unless `STAGING_URL` is set (G29).
+- **Accept:** `pnpm --filter @ibt/web e2e` passes locally.
+
+### Phase 8: Scripts, Docker, load, CI, README
+
+**P8-T1 `create-config.ts`** · CORE · d · 1.5h · deps: P2-T5
+- **Default:** `--dry-run` prints params and the derived accounts.
+- **`--send`:** requires `TREASURY_SECRET_KEY` from env **and** `I_AM_HUMAN=1` (exits 1 with a message otherwise); refuses `mainnet-beta` without `--confirm-mainnet`; writes nothing to disk; prints the config key (L574).
+- **Accept:** `pnpm tsx scripts/create-config.ts --cluster devnet --dry-run` exits 0 and prints `migrationQuoteThreshold` and `creatorTradingFeePercentage: 50`; `env -u I_AM_HUMAN pnpm tsx scripts/create-config.ts --cluster devnet --send` exits 1 before reading any key. Agents never run `--send`.
+
+**P8-T2 `seed-models.ts` + `dev-signin.ts`** · CORE · uh · 1.5h · deps: P3-T7, P5-T1
+- **seed-models:** idempotent model seeding (upstream defaults to the mock); `--dev-credit <wallet> <usdc>` (G23) writes the row through `adjust` imported from `@ibt/db` (P3-T6); `--fake-token` (local only) also seeds the fake chain pool and a `FakePriceSource` SOL price so the smoke settlement slice converts to > 0 lamports (L375). Both flags refuse unless `CLUSTER` ≠ `mainnet-beta` **and** the `MONGODB_URI` host is localhost/127.0.0.1 (G23).
+- **dev-signin:** ephemeral in-memory keypair; prints `{wallet, jwt}`.
+- **Accept:** with the api running: `pnpm tsx --env-file=apps/api/.env scripts/dev-signin.ts` prints a JWT, then `seed-models --dev-credit` increases `GET /api/me` balance; `MONGODB_URI=mongodb://db.example.com/ibt pnpm tsx scripts/seed-models.ts --dev-credit x 1` exits 1.
+
+**P8-T3 `refill-float.ts`** · CORE · q · 1h · deps: P2-T8
+- **Behaviour:** dry-run by default; prints treasury → keeper SOL transfer and the resulting float (runbook 3, L576).
+- **Accept:** `pnpm tsx scripts/refill-float.ts --dry-run --sol 1` exits 0.
+
+**P8-T4 `devnet-e2e.ts`** · CORE · d · 2h · deps: P6-T5, P8-T1
+- **Gate:** exits 0 with "skipped" unless `DEVNET_E2E=1`; refuses mainnet.
+- **Flow** (L590): throwaway keypairs (memory only) → airdrop with retry → create config (1 SOL) → launch → 3 buys → settlement on the curve → buy to threshold → migration → settlement after graduation → assert the keeper position is permanently locked and fees are claimable.
+- **Accept:** `pnpm tsx scripts/devnet-e2e.ts` (unset) prints `skipped`; `pnpm typecheck` passes. The live run is operator-only (H6).
+
+**P8-T5 Dockerfile** · CORE · q · 1h · deps: P0-T7
+- **Image:** multi-stage, `pnpm deploy`/prune (needs `injectWorkspacePackages: true` in `pnpm-workspace.yaml`, P0-T1), non-root, two start commands (G7); `.dockerignore`.
+- **Accept:** `docker build -t ibt . && docker run --rm -e PORT=4000 ibt node apps/api/dist/main.js --version-check` exits 0. Add a `--version-check` flag to main that prints and exits.
+
+**P8-T6 Load test** · CORE · uh · 1.5h · deps: P4-T4, P4-T5
+- **`scripts/load/gateway-load.ts`:** seeds ≥ 50 users/keys (each with dev credit) and round-robins requests across them, so no single key hits the 60/min rate limit (L423) or the 50 USDC daily cap; autocannon at 50 req/s for 60 s against the api with the mock; compares against a direct-to-mock p95 baseline; then queries Mongo for negative balances and duplicate captures (L591).
+- **Env-overridable limits:** the api env schema accepts `RATE_LIMIT_PER_MIN` and `DAILY_CAP_USDC` (defaults: the shared constants, G26) and the P4-T5 middleware reads them; the load profile (`pnpm load`) starts the api with both raised (e.g. `RATE_LIMIT_PER_MIN=100000 DAILY_CAP_USDC=1000000`).
+- **Accept:** `pnpm load` exits 0 with overhead p95 < 50 ms, 0 non-2xx responses, 0 negative balances and 0 duplicate captures; `pnpm --filter @ibt/api exec vitest run test/limits.int.test.ts` still passes (defaults unchanged).
+
+**P8-T7 CI finalize** · CORE · q · 1h · deps: P8-T4, P7-T11
+- **Adds:** Playwright install and run, docker build job, nightly e2e wiring.
+- **Accept:** workflow validates (P0-T6 command); local `act` run is optional.
+
+**P8-T8 README** · CORE · writing · 1.5h · deps: P8-T1..T6
+- **Sections:** what it is; ASCII architecture (G1); Meteora usage table (DBC config, createPool, swap2, migrateToDammV2, DAMM v2 add/lock/claim); run instructions; env table; runbooks; address table placeholders (L632–633).
+- **Accept:** `grep -c "migrateToDammV2\|permanentLockPosition\|create-config" README.md` ≥ 3.
+
+### Phase 9: Verification
+
+**P9-T1 `smoke-local.ts`** · CORE · d · 1.5h · deps: P8-T2, P6-T5
+- **Automates §9 local happy path** and exits non-zero on any mismatch. Loads env explicitly (`tsx --env-file`), seeds through P8-T2, then runs the live gateway curl moved here from P4-T4.
+- **Accept:** `pnpm smoke:local` prints `SMOKE OK`; with mongo, mock and api running and seeded as in §9, `curl -si http://localhost:4000/v1/chat/completions -H 'Content-Type: application/json' -H "Authorization: Bearer $KEY" -d '{"model":"mock-llm","messages":[{"role":"user","content":"Hello"}],"max_tokens":64}'` returns 200 with `X-Cost-Usdc`, and `curl -s http://localhost:4000/api/billing/ledger -H "Authorization: Bearer $JWT"` shows the hold and capture rows.
+
+**P9-T2 Acceptance checklist pass** · CORE · d · 1.5h · deps: P9-T1, P5-T5, P6-T6
+- **Maps each line L596–602** to an automated test id or an H-task.
+- **Adds tests:** "OpenAI SDK with only baseURL/apiKey changed" (`apps/api/test/acceptance.int.test.ts`, uses the `openai` npm package against the api with the mock); "kill keeper mid-settlement" (`apps/keeper/test/acceptance.test.ts`: child process runs `settle:once` with `FakeChainClient` persisting to the test Mongo, gets SIGKILL mid-run, a second process resumes; asserts from the `fakeChainTxs` collection exactly one provider transfer and one buy per settlement); "alerts on forced failure and low float" (same keeper file).
+- **Accept:** `pnpm --filter @ibt/api exec vitest run test/acceptance.int.test.ts && pnpm --filter @ibt/keeper exec vitest run test/acceptance.test.ts` passes.
+
+**P9-T3 Slop + consistency review** · CORE · uh · 2h · deps: P9-T2 · skills: `review-work`, `ai-slop-remover`
+- **Checks:** spec line references, error codes, env names identical across `.env.example`, README and code (`pnpm tsx scripts/check-env-consistency.ts`, written inline in the test as `scripts/test/env-consistency.test.ts`).
+- **Accept:** `pnpm --filter ./scripts exec vitest run test/env-consistency.test.ts` passes; reviewer report has 0 blockers.
+
+**P9-T4 Clean-clone DoD** · CORE · q · 1h · deps: P9-T3 (CORE tasks only; Wave C cut tasks run after this and are optional)
+- **Accept:** §9 sequence in a fresh `git clone` into `$TMPDIR` passes. If any Wave C task lands later, re-run this accept after it.
+
+### Task Dependency Graph (phase level; per-task deps are listed above)
+
+| Block | Depends on | Reason |
+|---|---|---|
+| P0 | — | Root |
+| P1 | P0-T7 | Needs workspace and tooling |
+| P2 | P0-T7 (P2-T1); P1 for T8 | SDKs install independently; client uses shared errors |
+| P3 | P1, P2-T8 | Models need schemas; app needs ChainClient |
+| P4 | P3 | Gateway needs auth and ledger |
+| P5 | P3, P2-T8 | Chain verification |
+| P6 | P3-T1, P3-T6, P2-T8, P1-T3 | db (models + ledger service), chain, split |
+| P7 | P1-T4 (+ api contract) | Can mock the api |
+| P8 | P2, P4, P6, P7 | Scripts and CI wrap everything |
+| P9 | all CORE (Wave C cut tasks run after P9-T4, optional) | Verification |
+
+### Parallel Execution Graph
+
+```
+Wave 1: P0-T1
+Wave 2: P0-T2, P0-T3, P0-T4, P0-T5
+Wave 3: P0-T6 → P0-T7
+Wave 4: P1-T1, P2-T1, P4-T1
+Wave 5: P1-T2, P1-T3, P1-T4, P1-T5, P2-T2, P2-T4, P2-T5
+Wave 6: P1-T6, P2-T3, P3-T1, P4-T2, P7-T1, P8-T5
+Wave 7: P2-T6, P2-T7, P3-T6, P7-T2, P7-T3, P7-T9
+Wave 8: P2-T8, P7-T4, P7-T6, P7-T7
+Wave 9: P3-T2, P8-T1, P8-T3, P7-T5, P7-T8, P7-T11
+Wave 10: P3-T3 → (P3-T4 ∥ P3-T5), P6-T1
+Wave 11: P3-T7, P4-T3, P5-T1, P5-T3, P6-T2, P6-T3
+Wave 12: P4-T4, P5-T2, P5-T4, P6-T4
+Wave 13: P4-T5, P5-T5, P6-T5
+Wave 14: P6-T6, P6-T7, P6-T8, P8-T2, P8-T4, P8-T6
+Wave 15: P8-T7, P8-T8, P9-T1
+Wave 16: P9-T2 → P9-T3 → P9-T4
+Wave C (cut list, OPTIONAL, only after P9-T4 passes): P4-T6, P4-T7, P4-T8, P6-T9, P7-T10
+Critical path: P0-T1→T3→T7→P2-T1→T2→T3→T6→T8→P3-T2→T3→T4→P3-T7 (∥ P5-T1)→P8-T2→P9-T1→T2→T3→T4. The settlement chain P3-T6→P6-T3→T4→T5 joins at P9-T1 and does not go through P4.
+```
+
+Totals: **73 tasks**, about **110 agent-hours** (chain and settlement `ub` tasks may run 1.5–2× their estimate) plus **15–20 human hours** (reviewing ~73 commits and running H0–H13). With 4–6 parallel agents the agent work is roughly 30–35 wall-clock hours.
+
+### Skills evaluation (applies to all tasks)
+
+- **Included:**
+  - `git-master` on every task (atomic commit);
+  - `frontend-ui-ux` on all P7 tasks;
+  - `playwright` on P7-T11;
+  - `review-work` and `ai-slop-remover` on P9-T3.
+- **Omitted:** `dev-browser`, docs/docx/pdf/pptx/xlsx/google-workspace/canvas-design/morning/import-memory/skill-creator/mcp-builder/learn/deep-research/browser/computer-use variants. None of them fit a TypeScript code build, and the deep-research skill isn't needed because the spec is authoritative.
+
+## 7. Human-only / operator tasks (never assigned to agents)
+
+All `--send` commands below run with `I_AM_HUMAN=1` in the operator's shell only (P8-T1).
+
+| ID | Task | Spec ref | By |
+|---|---|---|---|
+| H0 | **Devnet chain smoke** (required for the G-Chain gate): `I_AM_HUMAN=1 create-config.ts --cluster devnet --send`; launch one token on that config (`createPool`); do one swap on the curve. Record the signatures; any SDK drift found here goes back to P2-T5..T7 as a fix task | L610 | **Oct 4** |
+| H1 | Create the treasury and keeper wallets (hardware or secret store); never commit them | L515 | Oct 3 |
+| H2 | Helius devnet and mainnet keys; set `RPC_URL`/`RPC_URL_FALLBACK`; obtain `JUPITER_API_KEY` if Jupiter's price API requires one (G26) | L554 | Oct 3 |
+| H3 | Atlas M0 (staging) and M10 with backups (prod); IP rules | L545 | Oct 3 |
+| H4 | Fund the devnet treasury; **create the treasury USDC ATA** (devnet USDC mint) and record it as `TREASURY_USDC_ATA`/`VITE_TREASURY_USDC_ATA`; run `create-config.ts --cluster devnet --send` (may reuse the H0 config); paste the key into all three apps' env (runbook 1). Repeat the USDC ATA step for mainnet inside H8 | L574 | Oct 4 |
+| H5 | Railway (api + keeper, keeper 1 replica), Vercel (web), env secrets | L544–547 | Oct 8 |
+| H6 | Run `DEVNET_E2E=1 scripts/devnet-e2e.ts` twice in a row; devnet migration drill (runbook 6) | L579, L596 | **Oct 8–9** |
+| H7 | Telegram bot and chat id; force a settlement failure and a low float to confirm alerts | L602 | Oct 9 |
+| H8 | Mainnet: **only after H6, H7 and H9 all pass** (L594). Fund the treasury, create the mainnet treasury USDC ATA, `create-config --cluster mainnet-beta --send --confirm-mainnet`, refill the float (runbook 3) | L574–576, L594 | **Oct 10** |
+| H9 | Record one real devnet deposit and commit it as a parser fixture; wrong-memo deposit check | L598 | Oct 9 |
+| H10 | Before launching, check that the deployed web's `VITE_API_URL` is the production api domain (the metadata URI baked into the mint is immutable). First mainnet model launch with the treasury as provider; buy 0.1 SOL (runbook 2); real OpenAI SDK call | L575, L597 | **Oct 10** |
+| H11 | Provider claims creator and position fees from the dashboard; confirm settlement links | L600–601 | Oct 11 |
+| H12 | Fill the README address table; 3-minute demo video; live URL; add `dannxbt` if the repo is private; submit on Superteam Earn and Colosseum before **2026-10-13 06:59 UTC** | L629–636 | **Oct 12** (video + submission only) |
+| H13 | Legal framing review of copy | L535 | Oct 11 |
+
+Human time budget: ~15–20 h across H0–H13 plus commit review.
+
+## 8. Test matrix
+
+| Spec level (L585–592) | Tests created by |
+|---|---|
+| Unit: pricing, split remainder | P1-T2, P1-T3 |
+| Unit: hold/capture/release | P3-T6 |
+| Unit: deposit parser | P2-T4 (+ H9 real fixture) |
+| Unit: config snapshot | P2-T5 |
+| Integration: happy path, 402, upstream 500, timeout, revoked key | P4-T4, P3-T4 |
+| Integration: streaming `[DONE]` | P4-T6 |
+| Integration: idempotency replay | P4-T7 |
+| Integration: discount | P4-T8 |
+| Settlement: all items | P6-T3..T6 |
+| Chain e2e | P8-T4 (operator run H6) |
+| Load: `pnpm load` at 50 req/s for 60 s; p95 overhead < 50 ms, 0 negative balances, 0 duplicate captures | P8-T6 |
+| Frontend: TradePanel, DepositUsdc, LaunchWizard | P7-T5, P7-T6, P7-T7 |
+| Frontend: Playwright smoke | P7-T11 (staging: H-run) |
+| Acceptance L594–602 | P9-T2 + H6/H9–H11/H7 |
+
+## 9. Definition of done
+
+```bash
+git clone <repo> ibt && cd ibt && corepack enable
+pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test && pnpm build
+docker build -t ibt .
+docker compose up -d mongo
+cp apps/api/.env.example apps/api/.env && cp apps/keeper/.env.example apps/keeper/.env   # localhost MONGODB_URI, CHAIN_MODE=fake, CLUSTER=devnet
+pnpm --filter @ibt/mock-upstream start &                      # :4010
+(cd apps/api && node --env-file=.env dist/main.js) &          # :4000; nothing loads .env implicitly
+eval "$(pnpm -s tsx --env-file=apps/api/.env scripts/dev-signin.ts --export)"   # ephemeral nacl keypair → WALLET, JWT
+pnpm tsx --env-file=apps/api/.env scripts/seed-models.ts --owner $WALLET --fake-token --dev-credit $WALLET 10   # also seeds fake SOL price
+KEY=$(curl -s -XPOST http://localhost:4000/api/keys -H 'Content-Type: application/json' -H "Authorization: Bearer $JWT" -d '{"name":"dev"}' | jq -r .key)
+curl -si http://localhost:4000/v1/chat/completions -H 'Content-Type: application/json' -H "Authorization: Bearer $KEY" \
+  -d '{"model":"mock-llm","messages":[{"role":"user","content":"Hello"}],"max_tokens":64}'
+#   → 200, X-Cost-Usdc, X-Balance-Usdc < 10.000000
+curl -s "http://localhost:4000/api/billing/ledger" -H "Authorization: Bearer $JWT"   # hold(captured) + capture rows
+pnpm --filter @ibt/keeper settle:once -- --chain fake --period-start "$(date -u +%Y-%m-%dT%H:00:00Z)"   # tsx --env-file=.env (P6-T1)
+#   → state "done", provider carry-over (<1 USDC), liquidity buy signature from the fake chain (slice > 0 thanks to seeded price)
+pnpm --filter @ibt/web build
+kill %1 %2          # stop mock and api so smoke:local can start its own on the same ports
+pnpm smoke:local    # automates all of the above → "SMOKE OK"
+```
+
+## 10. Risk register
+
+| Risk | Mitigation | Task |
+|---|---|---|
+| Meteora SDK API drift (already found 4 differences) | Exact pins, surface test, wrappers isolate the SDK | P2-T1, P2-T6, P2-T7 |
+| web3.js 1.x vs 2.x conflicts | `^1.99.0` override, single copy; check with `pnpm why @solana/web3.js` | P0-T1, P2-T1 |
+| Vite polyfills for `Buffer`/`process` | `vite-plugin-node-polyfills` with `buffer` + `process` only; DBC and cp-amm SDK import in the P7-T1 build accept | P7-T1 |
+| Keeper crash after a tx lands but before its signature is stored (double pay) | `onSigned` persists the signature before send; resume checks `getSignatureStatuses` | P2-T3, P6-T3..T6 |
+| `development` condition ignored by TS / two mongoose copies / pnpm 10+ config moves | G10 typecheck note, G11 single mongoose in `@ibt/db`, `pnpm-workspace.yaml` overrides + `onlyBuiltDependencies` + `injectWorkspacePackages` | P0-T1, P0-T3, P3-T1 |
+| First real DBC/DAMM tx happens late with no fallback | H0 devnet chain smoke by Oct 4 | H0 |
+| DBC SDK is CJS under ESM | Dynamic import check in the surface test | P2-T1 |
+| mongodb-memory-server binary download on macOS/CI | Pin `MONGOMS_VERSION`, cache binaries in CI, Docker fallback | P0-T3, P0-T6 |
+| Transactions need a replica set | `--replSet rs0` + MongoMemoryReplSet | P0-T5, P3-T1 |
+| undici streaming back-pressure and aborts | `stream.pipeline`, abort on `req.close`, tests | P4-T6 |
+| BigInt and base-unit strings | BigInt math in shared, string storage, property tests | P1-T2, P1-T3 |
+| tiktoken WASM in Node and memory use | Singleton encoder, leak test | P4-T2 |
+| undici 8 / jsdom 30 need Node 22 | Pinned 7.x / 25.x | §4 |
+| Health-check vs L190 contradiction | G12 | P5-T3, P6-T7 |
+| Devnet faucet unreliability | `DEVNET_E2E` gate, airdrop retry, operator run | P8-T4 |
+| Oct 13 deadline (~110 agent-hours + 15–20 human hours vs 11 days) | Gates, cut-list wave optional after P9-T4, parallel waves, mainnet by Oct 10, cut order in §11 | §6, §7, §11 |
+
+## 11. Scope markers
+
+- **CUT (5, Wave C, optional, after P9-T4):** P4-T6, P4-T7, P4-T8, P6-T9, P7-T10.
+- **CORE:** all 68 other tasks.
+
+**Cut order if over budget** (apply top to bottom):
+1. The spec's own cut list: P4-T6, P4-T7, P4-T8, P6-T9, P7-T10.
+2. P7-T11 Playwright.
+3. P8-T6 load test (run once by hand).
+4. P9-T3 review.
+5. P5-T5 5xx-rate counter.
+6. P6-T8 signature re-check (keep the ledger recompute).
+7. P8-T7.
+8. P7-T9 becomes a static page.
+
+**Never cut:** P2-T3, P3-T6, P6-T3–T6, P2-T4, P4-T5 caps.
+- **Post-MVP:** none built. The spec defers vesting classes, burn-to-credit, Jupiter refill job, indexer and DLMM (L672–678); they are listed as assumptions only.
+
+## Commit strategy
+
+- **One task = one commit** (`git-master`), Conventional Commits with the task id: `feat(chain): sendAndConfirm with blockhash resend [P2-T3]`.
+- **TDD:** the test commit may be squashed into the feature commit, but the test must fail before the implementation exists.
+- **Before every commit:** `pnpm lint && pnpm typecheck && pnpm --filter <pkg> test`.
+- **Lockfile:** changes only in the task that adds the dependency.
+- **Gates:** after each gate passes, tag it with `git tag gate-<name>`.
+
+## TODO list
+
+> Caller: add these and run them wave by wave. Details and QA commands for each id are in §6.
+
+- **Wave 1–3:**
+  - P0-T1 (q, none → T2–T6)
+  - P0-T2, P0-T3, P0-T4, P0-T5 (q)
+  - P0-T6 (q)
+  - P0-T7 (q, gate)
+- **Wave 4–5:**
+  - P1-T1 (q)
+  - P2-T1 (d)
+  - P4-T1 (q)
+  - P1-T2, P1-T3 (d)
+  - P1-T4 (uh)
+  - P1-T5 (q)
+  - P2-T2 (uh)
+  - P2-T4 (ub)
+  - P2-T5 (d)
+- **Wave 6–8:**
+  - P1-T6, P3-T1 (uh)
+  - P2-T3, P2-T6, P2-T7 (ub)
+  - P4-T2 (q)
+  - P7-T1 (ve)
+  - P8-T5 (q)
+  - P3-T6 (ub)
+  - P7-T2, P7-T3, P7-T9 (ve)
+  - P2-T8 (d)
+  - P7-T4, P7-T6, P7-T7 (ve)
+- **Wave 9–11:**
+  - P3-T2 (uh)
+  - P8-T1 (d)
+  - P8-T3 (q)
+  - P7-T5, P7-T8 (ve)
+  - P7-T11 (ve + playwright)
+  - P3-T3, P3-T4, P3-T5, P6-T1 (uh)
+  - P3-T7 (uh)
+  - P4-T3 (uh)
+  - P5-T1 (d)
+  - P5-T3 (uh)
+  - P6-T2 (d)
+  - P6-T3 (ub)
+- **Wave 12–15:**
+  - P4-T4 (ub)
+  - P5-T2, P5-T4 (uh)
+  - P6-T4 (ub)
+  - P4-T5 (uh)
+  - P5-T5 (q)
+  - P6-T5 (ub)
+  - P6-T6 (ub)
+  - P6-T7, P6-T8, P8-T2 (uh)
+  - P8-T6 (uh, after P4-T5)
+  - P8-T4 (d)
+  - P8-T7 (q)
+  - P8-T8 (writing)
+  - P9-T1 (d)
+- **Wave 16:**
+  - P9-T2 (d)
+  - P9-T3 (uh + review-work, ai-slop-remover)
+  - P9-T4 (q, CORE deps only)
+- **Wave C (optional, only after P9-T4 passes; skip per the §11 cut order if over budget):**
+  - P4-T6 (ub)
+  - P4-T7, P4-T8 (uh)
+  - P6-T9 (q)
+  - P7-T10 (ve)
+- **Human gates (not agent tasks, §7):** H0 must pass before tagging `gate-chain` (Oct 4); H6 Oct 8–9; H8/H10 by Oct 10, H8 only after H6 + H7 + H9.
+
+**Execution:** fire each wave's tasks in parallel with `task(category=<cat>, load_skills=[git-master,(+frontend-ui-ux for P7)], prompt="<task id block from §6>")`, then run every QA command before the next wave.
+
+## 12. Review log
+
+Oracle review 1 (2026-10-01): APPROVE WITH FIXES. All items applied; see review-oracle-1.md.

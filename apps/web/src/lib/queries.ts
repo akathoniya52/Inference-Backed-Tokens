@@ -7,6 +7,7 @@ import type {
 import { skipToken, useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
 import { apiFetch } from './api';
+import { queryKeys } from './queryKeys';
 
 // Public read queries for Explore and the token page (spec L502). Keys stay
 // local so they cannot collide with the shapes cached under `queryKeys`.
@@ -77,5 +78,33 @@ export function useSettlements(mint: string | null) {
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
     refetchInterval: SETTLEMENTS_REFETCH_MS,
+  });
+}
+
+const PROVIDER_PAGE_LIMIT = 100;
+
+/**
+ * Every public model whose provider is `wallet`. The registry lists active and
+ * paused models, so a paused model stays visible to its owner.
+ */
+export function useProviderModels(wallet: string | null) {
+  return useQuery({
+    queryKey: queryKeys.providerModels(wallet),
+    queryFn:
+      wallet === null
+        ? skipToken
+        : async ({ signal }) => {
+            const owned: Model[] = [];
+            let cursor: string | null = null;
+            do {
+              const page: ListModelsResponse = await apiFetch<ListModelsResponse>(
+                `/api/models${pageQuery(cursor, PROVIDER_PAGE_LIMIT)}`,
+                { signal },
+              );
+              owned.push(...page.items.filter((model) => model.providerWallet === wallet));
+              cursor = page.nextCursor;
+            } while (cursor !== null);
+            return owned;
+          },
   });
 }

@@ -9,4 +9,6 @@ export const queryKeys = {
   keys: () => ['keys'] as const,
   ledger: () => ['ledger'] as const,
   usage: () => ['usage'] as const,
+  providerModels: (wallet: string | null) => ['providerModels', wallet] as const,
+  feeClaimer: (dbcPool: string) => ['feeClaimer', dbcPool] as const,
 };

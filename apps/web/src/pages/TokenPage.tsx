@@ -2,6 +2,7 @@ import type { Model, TokenStateResponse } from '@ibt/shared';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
+import { OwnerClaimFees } from '../components/ClaimFees';
 import { CopyButton } from '../components/CodeBlock';
 import { CurveProgress } from '../components/CurveProgress';
 import { formatMTokPrice, PhaseBadge } from '../components/ModelCard';
@@ -28,6 +29,7 @@ interface TokenPageProps {
 }
 
 const defaultTradePanel: Slot = ({ model }) => <TradePanel model={model} />;
+const defaultClaimFees: Slot = ({ model }) => <OwnerClaimFees model={model} />;
 
 const SECTION_LABEL = 'font-mono text-xs uppercase tracking-label text-ink-400';
 const PANEL = 'rounded-sm border border-ink-800 bg-ink-900/60 p-6';
@@ -107,7 +109,10 @@ function PhasePanel({ model }: { model: Model }) {
   );
 }
 
-export function TokenPage({ tradePanel = defaultTradePanel, claimFees }: TokenPageProps = {}) {
+export function TokenPage({
+  tradePanel = defaultTradePanel,
+  claimFees = defaultClaimFees,
+}: TokenPageProps = {}) {
   const { slug = '' } = useParams<{ slug: string }>();
   const model = useModel(slug);
   const token = model.data?.token;

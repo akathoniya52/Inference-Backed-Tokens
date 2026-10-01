@@ -22,7 +22,8 @@ import {
 } from './lib/cli.js';
 
 const USAGE =
-  'usage: refill-float.ts --sol <n> [--cluster devnet|mainnet-beta] [--dry-run | --send [--confirm-mainnet]] [--rpc-url <url>]';
+  'usage: refill-float.ts --sol <n> [--cluster devnet|mainnet-beta] [--dry-run | --send [--confirm-mainnet]] [--rpc-url <url>]\n' +
+  '  --cluster defaults to env CLUSTER, then devnet; --rpc-url to env RPC_URL';
 const DEVNET_PUBLIC_RPC = 'https://api.devnet.solana.com';
 
 const solAmount = z
@@ -50,17 +51,27 @@ interface Plan {
   balanceSource: string;
 }
 
+function floatStatus(float: bigint | null, min: bigint): string {
+  if (float === null) return 'unknown';
+  return float < min ? `BREACHED (${sol(float)} < ${sol(min)})` : 'ok';
+}
+
 function planLines(plan: Plan): string[] {
-  const resulting = plan.keeperBalance === null ? null : plan.keeperBalance + plan.lamports;
-  const meetsMin =
-    resulting !== null ? resulting >= plan.floatMin : plan.lamports >= plan.floatMin ? true : null;
+  const keeperAfter = plan.keeperBalance === null ? null : plan.keeperBalance + plan.lamports;
+  // With the keeper balance unknown, the transfer alone is a lower bound of the result.
+  const keeperAfterFloor = keeperAfter ?? (plan.lamports >= plan.floatMin ? plan.lamports : null);
   const treasuryAfter = plan.treasuryBalance === null ? null : plan.treasuryBalance - plan.lamports;
+  const shortfall = treasuryAfter !== null && treasuryAfter < 0n ? '  INSUFFICIENT' : '';
   return [
-    `from treasury ${plan.treasury?.toBase58() ?? '<TREASURY_WALLET unset>'} → keeper ${plan.keeper?.toBase58() ?? '<KEEPER_WALLET unset>'} ${lamportsToSol(plan.lamports)} SOL (${plan.lamports} lamports)`,
-    `balances from: ${plan.balanceSource}`,
-    `treasury:       ${sol(plan.treasuryBalance)} → ${sol(treasuryAfter)} (plus the tx fee)`,
-    `keeper float:   ${sol(plan.keeperBalance)} → ${sol(resulting)}`,
-    `FLOAT_MIN_SOL:  ${lamportsToSol(plan.floatMin)} SOL; resulting float ≥ minimum: ${meetsMin === null ? 'unknown' : meetsMin ? 'yes' : 'NO'}`,
+    `transfer:       ${lamportsToSol(plan.lamports)} SOL (${plan.lamports} lamports)`,
+    `  from treasury ${plan.treasury?.toBase58() ?? '<TREASURY_WALLET unset>'}`,
+    `  to keeper     ${plan.keeper?.toBase58() ?? '<KEEPER_WALLET unset>'}`,
+    `balances from:  ${plan.balanceSource}`,
+    `treasury:       ${sol(plan.treasuryBalance)} → ${sol(treasuryAfter)} (plus the tx fee)${shortfall}`,
+    `keeper float:   ${sol(plan.keeperBalance)} → ${sol(keeperAfter)}`,
+    `FLOAT_MIN_SOL:  ${sol(plan.floatMin)}`,
+    `  now:          ${floatStatus(plan.keeperBalance, plan.floatMin)}`,
+    `  after refill: ${floatStatus(keeperAfterFloor, plan.floatMin)}`,
   ];
 }
 

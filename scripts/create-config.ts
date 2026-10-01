@@ -20,22 +20,25 @@ import bs58 from 'bs58';
 import {
   assertRpcCluster,
   CliError,
+  EXIT_ERROR,
   EXIT_OK,
-  EXIT_SEND_FAILED,
   parseCli,
-  parseCluster,
   readPublicKeyEnv,
   readSecretKeypair,
   requireHuman,
   requireMainnetConfirm,
+  resolveCluster,
   resolveMode,
   resolveRpcUrl,
   runMain,
 } from './lib/cli.js';
 
 const USAGE =
-  'usage: create-config.ts --cluster devnet|mainnet-beta [--dry-run | --send [--confirm-mainnet]] [--rpc-url <url>]';
+  'usage: create-config.ts [--cluster devnet|mainnet-beta] [--dry-run | --send [--confirm-mainnet]] [--rpc-url <url>]\n' +
+  '  --cluster defaults to env CLUSTER, --rpc-url to env RPC_URL';
 const DEVNET_PUBLIC_RPC = 'https://api.devnet.solana.com';
+/** 32 zero bytes: lets the dry-run serialize the unsigned tx without an RPC. */
+const PLACEHOLDER_BLOCKHASH = PublicKey.default.toBase58();
 /** Account names of `createConfig` in the DBC 1.5.13 IDL, in instruction order. */
 const CREATE_CONFIG_ACCOUNTS = [
   'config',
@@ -96,7 +99,31 @@ function envLines(configKey: string): string[] {
   ];
 }
 
-async function dryRun(cluster: Cluster): Promise<number> {
+/** Read-only RPC use: checks the genesis hash and fetches a blockhash. Never prints the URL. */
+async function dryRunBlockhash(
+  cluster: Cluster,
+  rpcFlag: string | undefined,
+): Promise<{ connection: Connection; blockhash: string; source: string }> {
+  const rpcUrl = resolveRpcUrl(rpcFlag);
+  if (!rpcUrl) {
+    return {
+      // buildCreateConfigTx makes no RPC call; this connection is never contacted.
+      connection: new Connection('http://127.0.0.1:8899'),
+      blockhash: PLACEHOLDER_BLOCKHASH,
+      source: 'placeholder, no RPC_URL or --rpc-url',
+    };
+  }
+  const rpc = createRpc({ rpcUrl });
+  await assertRpcCluster(rpc.primary, cluster);
+  const { blockhash } = await rpc.read.getLatestBlockhash();
+  return {
+    connection: rpc.primary,
+    blockhash,
+    source: `latest on ${cluster}, genesis hash checked`,
+  };
+}
+
+async function dryRun(cluster: Cluster, rpcFlag: string | undefined): Promise<number> {
   const config = Keypair.generate();
   const treasuryEnv = readPublicKeyEnv('TREASURY_WALLET');
   // Stand-in so the instruction can be built; shown as a placeholder below.
@@ -106,14 +133,17 @@ async function dryRun(cluster: Cluster): Promise<number> {
   ]);
   if (!treasuryEnv) labels.set(treasury.toBase58(), '<TREASURY_WALLET unset>');
 
-  // buildCreateConfigTx makes no RPC call; this connection is never contacted.
-  const connection = new Connection('http://127.0.0.1:8899');
+  const { connection, blockhash, source } = await dryRunBlockhash(cluster, rpcFlag);
   const tx = await buildCreateConfigTx({
     connection,
     configPubkey: config.publicKey,
     treasury,
     cluster,
   });
+  tx.feePayer = treasury;
+  tx.recentBlockhash = blockhash;
+  // Also enforces the 1232-byte packet limit ("Transaction too large").
+  const unsigned = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
   const params = buildPartnerConfigParams(cluster);
 
   console.log(
@@ -133,6 +163,9 @@ async function dryRun(cluster: Cluster): Promise<number> {
       '',
       `buildPartnerConfigParams('${cluster}'):`,
       JSON.stringify(printable(params), null, 2),
+      '',
+      `unsigned tx, base64 (${unsigned.length} bytes; fee payer: treasury; blockhash ${blockhash}: ${source}):`,
+      unsigned.toString('base64'),
       '',
       'after --send, set in all three apps (runbook 1):',
       ...envLines('<config key printed by --send>'),
@@ -203,7 +236,7 @@ async function send(cluster: Cluster, rpcFlag: string | undefined): Promise<numb
       err instanceof Error && err.cause instanceof Error ? `: ${err.cause.message}` : '';
     console.error(`send failed${cause}`);
     console.error(`check the signed signature above (if any) before re-running.`);
-    return EXIT_SEND_FAILED;
+    return EXIT_ERROR;
   }
 }
 
@@ -218,8 +251,8 @@ runMain(async () => {
     },
     USAGE,
   );
-  const cluster = parseCluster(flags.cluster, USAGE);
-  if (resolveMode(flags) === 'dry-run') return dryRun(cluster);
+  const cluster = resolveCluster(flags.cluster, USAGE);
+  if (resolveMode(flags) === 'dry-run') return dryRun(cluster, flags['rpc-url']);
 
   // Gate order matters: both refusals happen before any key is read.
   requireHuman();

@@ -8,14 +8,14 @@ import { z } from 'zod';
 import {
   assertRpcCluster,
   CliError,
+  EXIT_ERROR,
   EXIT_OK,
-  EXIT_SEND_FAILED,
   parseCli,
-  parseCluster,
   readPublicKeyEnv,
   readSecretKeypair,
   requireHuman,
   requireMainnetConfirm,
+  resolveCluster,
   resolveMode,
   resolveRpcUrl,
   runMain,
@@ -90,7 +90,7 @@ runMain(async () => {
   const lamports = parseSol('--sol', flags.sol);
   if (lamports === 0n) throw new CliError('--sol must be greater than 0');
   const floatMin = parseSol('FLOAT_MIN_SOL', process.env.FLOAT_MIN_SOL?.trim() || '0.5');
-  const cluster = parseCluster(flags.cluster ?? process.env.CLUSTER ?? 'devnet', USAGE);
+  const cluster = resolveCluster(flags.cluster, USAGE, 'devnet');
   const mode = resolveMode(flags);
 
   if (mode === 'dry-run') {
@@ -170,6 +170,6 @@ runMain(async () => {
       err instanceof Error && err.cause instanceof Error ? `: ${err.cause.message}` : '';
     console.error(`send failed${cause}`);
     console.error('check the signed signature above (if any) before re-running.');
-    return EXIT_SEND_FAILED;
+    return EXIT_ERROR;
   }
 });

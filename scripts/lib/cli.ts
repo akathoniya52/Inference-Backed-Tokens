@@ -8,13 +8,15 @@ import bs58 from 'bs58';
 import { z } from 'zod';
 
 export const EXIT_OK = 0;
+/** A gate said no: `I_AM_HUMAN`, `--confirm-mainnet` or a missing secret key. */
 export const EXIT_REFUSED = 1;
-export const EXIT_SEND_FAILED = 2;
+/** Anything else: bad flags or env, RPC failures, a failed send. */
+export const EXIT_ERROR = 2;
 
 export class CliError extends Error {
   constructor(
     message: string,
-    readonly exitCode: number = EXIT_REFUSED,
+    readonly exitCode: number = EXIT_ERROR,
   ) {
     super(message);
     this.name = 'CliError';
@@ -33,7 +35,7 @@ export function runMain(main: () => Promise<number>): void {
         return;
       }
       console.error('error:', err instanceof Error ? err.message : String(err));
-      process.exitCode = EXIT_REFUSED;
+      process.exitCode = EXIT_ERROR;
     },
   );
 }
@@ -57,10 +59,24 @@ export function parseCli<O extends Options>(options: O, usage: string): CliValue
 
 export const clusterSchema = z.enum(CLUSTERS);
 
-export function parseCluster(value: string | undefined, usage: string): Cluster {
+/**
+ * `--cluster` wins over env `CLUSTER`; the two must agree when both are set.
+ * Without either, `fallback` is used, or the run stops when there is none.
+ */
+export function resolveCluster(
+  flag: string | undefined,
+  usage: string,
+  fallback?: Cluster,
+): Cluster {
+  const env = process.env.CLUSTER?.trim() || undefined;
+  if (flag !== undefined && env !== undefined && flag !== env) {
+    throw new CliError(`--cluster ${flag} contradicts CLUSTER=${env}`);
+  }
+  const value = flag ?? env ?? fallback;
+  if (value === undefined) throw new CliError(`pass --cluster or set CLUSTER\n${usage}`);
   const parsed = clusterSchema.safeParse(value);
   if (!parsed.success) {
-    throw new CliError(`--cluster must be one of ${CLUSTERS.join(', ')}\n${usage}`);
+    throw new CliError(`cluster must be one of ${CLUSTERS.join(', ')}\n${usage}`);
   }
   return parsed.data;
 }
@@ -76,6 +92,7 @@ export function requireHuman(): void {
     throw new CliError(
       'refusing --send: I_AM_HUMAN=1 is not set. Sending is operator-only (work plan §7); ' +
         'no key was read.',
+      EXIT_REFUSED,
     );
   }
 }
@@ -84,6 +101,7 @@ export function requireMainnetConfirm(cluster: Cluster, confirmed: boolean | und
   if (cluster === 'mainnet-beta' && !confirmed) {
     throw new CliError(
       'refusing --send on mainnet-beta without --confirm-mainnet; no key was read.',
+      EXIT_REFUSED,
     );
   }
 }
@@ -97,7 +115,8 @@ const byteArraySchema = z.array(z.number().int().min(0).max(255)).length(64);
  */
 export function readSecretKeypair(name: string): Keypair {
   const raw = process.env[name]?.trim();
-  if (!raw) throw new CliError(`${name} is not set`);
+  // P8-T1: `--send` without the key is refused like the other gates.
+  if (!raw) throw new CliError(`refusing --send: ${name} is not set`, EXIT_REFUSED);
   let bytes: Uint8Array;
   try {
     bytes = raw.startsWith('[')

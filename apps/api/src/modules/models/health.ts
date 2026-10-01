@@ -1,9 +1,7 @@
 import { Models, type ModelFields, type Types } from '@ibt/db';
 import {
   ChatCompletionResponseSchema,
-  FIRST_BYTE_TIMEOUT_MS,
   HEALTH_FAILURES_TO_PAUSE,
-  TOTAL_TIMEOUT_MS,
   type HealthCheckResponse,
   type ModelStatus,
 } from '@ibt/shared';
@@ -11,6 +9,7 @@ import { decrypt } from '@ibt/shared/node';
 import { request } from 'undici';
 
 import type { AppContext } from '../../app.js';
+import { chatCompletionsUrl, isUpstreamTimeout, upstreamTimeouts } from '../../lib/upstream.js';
 
 export type HealthCheckModel = Pick<ModelFields, 'slug' | 'upstream' | 'status'> & {
   _id: Types.ObjectId;
@@ -29,21 +28,10 @@ function recordLatency(modelId: string, latencyMs: number): number {
 
 type ProbeResult = { ok: true; latencyMs: number } | { ok: false; error: string };
 
-function isTimeout(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  return (
-    err.name === 'TimeoutError' ||
-    err.name === 'AbortError' ||
-    ('code' in err &&
-      (err.code === 'UND_ERR_HEADERS_TIMEOUT' || err.code === 'UND_ERR_BODY_TIMEOUT'))
-  );
-}
-
 /** One `max_tokens: 1` completion against the provider (L250). Errors never carry the key. */
 async function probe(ctx: AppContext, model: HealthCheckModel): Promise<ProbeResult> {
-  const firstByteMs = ctx.timeouts.firstByteMs ?? FIRST_BYTE_TIMEOUT_MS;
-  const totalMs = ctx.timeouts.totalMs ?? TOTAL_TIMEOUT_MS;
-  const url = `${model.upstream.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const { firstByteMs, totalMs } = upstreamTimeouts(ctx);
+  const url = chatCompletionsUrl(model.upstream.baseUrl);
   const started = performance.now();
   try {
     const res = await request(url, {
@@ -72,7 +60,7 @@ async function probe(ctx: AppContext, model: HealthCheckModel): Promise<ProbeRes
     }
     return { ok: true, latencyMs: Math.round(performance.now() - started) };
   } catch (err) {
-    if (isTimeout(err)) return { ok: false, error: 'upstream timed out' };
+    if (isUpstreamTimeout(err)) return { ok: false, error: 'upstream timed out' };
     ctx.logger.warn(
       { modelId: model._id.toHexString(), errName: err instanceof Error ? err.name : 'unknown' },
       'health check request failed',

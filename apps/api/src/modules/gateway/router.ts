@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Models, Users, type ModelFields, type Types } from '@ibt/db';
 import {
   AppError,
@@ -10,9 +12,10 @@ import {
 import { Router } from 'express';
 
 import type { AppContext } from '../../app.js';
-import { getRequestId } from '../../context.js';
+import { getRequestId, requireApiKeyContext } from '../../context.js';
 import { apiKeyAuth } from '../../middleware/apiKeyAuth.js';
 import { parseInput } from '../../validate.js';
+import { completeChat } from './completions.js';
 
 interface ActiveModelRow {
   _id: Types.ObjectId;
@@ -77,16 +80,20 @@ export function gatewayRouter(ctx: AppContext): Router {
   });
 
   router.post('/chat/completions', async (req, res) => {
-    const { body } = validateChatRequest(req.body);
-    await resolveModel(body.model);
-    // Forwarding, billing and streaming land in P4-T4.
-    res.status(501).json({
-      error: {
-        code: 'not_implemented',
-        message: 'chat completions are not available yet',
-        requestId: getRequestId(req),
-      },
+    const key = requireApiKeyContext(req);
+    const { body, maxTokens } = validateChatRequest(req.body);
+    if (body.stream === true) {
+      throw new AppError('invalid_request', { message: 'streaming is not supported' });
+    }
+    const model = await resolveModel(body.model);
+    const result = await completeChat(ctx, {
+      requestId: getRequestId(req) ?? randomUUID(),
+      key,
+      model,
+      body,
+      maxTokens,
     });
+    res.set(result.headers).type('application/json').send(result.rawBody);
   });
 
   return router;

@@ -104,10 +104,10 @@ describe('gateway: /v1/models, resolve and validation', () => {
     }
   });
 
-  it('a valid request passes validation and resolve (forwarding arrives in P4-T4)', async () => {
+  it('a valid request passes validation and resolve and reaches the hold', async () => {
     const res = await chat({ model: 'gw-active', messages: hello, max_tokens: MAX_TOKENS_CAP });
-    expect(res.status).toBe(501);
-    expect(errorOf(res).code).toBe('not_implemented');
+    expect(res.status).toBe(402);
+    expect(errorOf(res).code).toBe('insufficient_credits');
   });
 
   it('validateChatRequest applies the max_tokens default and keeps unknown fields', () => {

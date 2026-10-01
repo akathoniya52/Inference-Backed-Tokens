@@ -8,7 +8,8 @@
     "refill-float": "tsx --conditions=development refill-float.ts",
     "seed-models": "tsx --conditions=development seed-models.ts",
     "dev-signin": "tsx --conditions=development dev-signin.ts",
-    "devnet-e2e": "tsx --conditions=development devnet-e2e.ts"
+    "devnet-e2e": "tsx --conditions=development devnet-e2e.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@ibt/chain": "workspace:*",

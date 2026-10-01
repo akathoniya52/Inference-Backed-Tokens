@@ -1,3 +1,4 @@
+import './version-check.js';
 import { createHealthServer } from './health-server.js';
 
 const port = Number(process.env.KEEPER_PORT ?? 4001);

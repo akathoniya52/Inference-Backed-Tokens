@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+.git
+.github
+.sisyphus
+*.md
+.env*
+!.env.example
+.DS_Store
+Dockerfile
+.dockerignore

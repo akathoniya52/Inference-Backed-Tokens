@@ -8,6 +8,12 @@
     { "path": "packages/db" },
     { "path": "packages/db/tsconfig.test.json" },
     { "path": "apps/mock-upstream" },
-    { "path": "apps/mock-upstream/tsconfig.test.json" }
+    { "path": "apps/mock-upstream/tsconfig.test.json" },
+    { "path": "apps/api" },
+    { "path": "apps/api/tsconfig.test.json" },
+    { "path": "apps/keeper" },
+    { "path": "apps/keeper/tsconfig.test.json" },
+    { "path": "apps/web" },
+    { "path": "scripts" }
   ]
 }

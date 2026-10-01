@@ -1,0 +1,10 @@
+{
+  "name": "@ibt/scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ibt/shared": "workspace:*",
+    "tsx": "^4.23.0"
+  }
+}

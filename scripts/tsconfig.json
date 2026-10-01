@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
+    "types": ["node"]
+  },
+  "include": ["*.ts", "load/**/*.ts"],
+  "references": [{ "path": "../packages/shared" }]
+}

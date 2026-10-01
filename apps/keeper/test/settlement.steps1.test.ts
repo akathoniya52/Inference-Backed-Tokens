@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { periodFromStart, settlementPeriod } from '../src/settlement/period.js';
 import {
-  SETTLEMENT_STEPS,
+  PROVIDER_STEPS,
   lease,
   payProvider,
   runSteps,
@@ -103,7 +103,7 @@ describe('settlement steps 1–3', () => {
     const { model } = await createTestModel(ctx, 'curve');
     const callsBefore = ctx.chain.calls.length;
     const doc = await open(model._id);
-    await runSteps(ctx, doc, SETTLEMENT_STEPS);
+    await runSteps(ctx, doc, PROVIDER_STEPS);
 
     const saved = await reload(doc);
     expect(saved.state).toBe('done');
@@ -139,7 +139,7 @@ describe('settlement steps 1–3', () => {
     const { model, providerWallet } = await createTestModel(ctx, 'curve');
     await addRequest(model._id, micro(10), P0);
     const doc = await open(model._id);
-    await runSteps(ctx, doc, SETTLEMENT_STEPS);
+    await runSteps(ctx, doc, PROVIDER_STEPS);
 
     const saved = await reload(doc);
     expect(saved.state).toBe('paid_provider');
@@ -158,7 +158,7 @@ describe('settlement steps 1–3', () => {
     await addRequest(model._id, 900_000n, P0);
     const before = transfers();
     const first = await open(model._id);
-    await runSteps(ctx, first, SETTLEMENT_STEPS);
+    await runSteps(ctx, first, PROVIDER_STEPS);
 
     const s1 = await reload(first);
     expect(s1.state).toBe('paid_provider');
@@ -171,7 +171,7 @@ describe('settlement steps 1–3', () => {
     const P1 = new Date(P0.getTime() + HOUR);
     await addRequest(model._id, 300_000n, P1);
     const second = await open(model._id, P1);
-    await runSteps(ctx, second, SETTLEMENT_STEPS);
+    await runSteps(ctx, second, PROVIDER_STEPS);
 
     const s2 = await reload(second);
     expect(s2.provider.amountMicroUsdc).toBe(1_080_000n);
@@ -188,7 +188,7 @@ describe('settlement steps 1–3', () => {
     const cap = ctx.config.maxPayoutMicroUsdc;
     ctx.config.maxPayoutMicroUsdc = micro(500);
     try {
-      await runSteps(ctx, doc, SETTLEMENT_STEPS);
+      await runSteps(ctx, doc, PROVIDER_STEPS);
     } finally {
       ctx.config.maxPayoutMicroUsdc = cap;
     }
@@ -213,7 +213,7 @@ describe('settlement steps 1–3', () => {
     expect(landedSig).toEqual(expect.any(String));
     const before = transfers();
 
-    await runSteps(ctx, crashed, SETTLEMENT_STEPS);
+    await runSteps(ctx, crashed, PROVIDER_STEPS);
     const saved = await reload(doc);
     expect(transfers()).toBe(before);
     expect(saved.state).toBe('paid_provider');
@@ -229,13 +229,13 @@ describe('settlement steps 1–3', () => {
     const doc = await open(model._id);
 
     ctx.chain.crashAfter('transferUsdc');
-    await expect(runSteps(ctx, doc, SETTLEMENT_STEPS)).rejects.toThrow();
+    await expect(runSteps(ctx, doc, PROVIDER_STEPS)).rejects.toThrow();
     const crashed = await reload(doc);
     const staleSig = crashed.pendingTx?.signature;
     expect(staleSig).toEqual(expect.any(String));
 
     ctx.setBlockHeight(Number.MAX_SAFE_INTEGER);
-    await runSteps(ctx, crashed, SETTLEMENT_STEPS);
+    await runSteps(ctx, crashed, PROVIDER_STEPS);
     const saved = await reload(doc);
     expect(saved.state).toBe('paid_provider');
     expect(saved.provider.txSignature).not.toBe(staleSig);
@@ -248,12 +248,12 @@ describe('settlement steps 1–3', () => {
     await addRequest(model._id, micro(10), P0);
     const doc = await open(model._id);
     ctx.chain.crashAfter('transferUsdc');
-    await expect(runSteps(ctx, doc, SETTLEMENT_STEPS)).rejects.toThrow();
+    await expect(runSteps(ctx, doc, PROVIDER_STEPS)).rejects.toThrow();
     const before = transfers();
 
     ctx.setBlockHeight(0);
     try {
-      await expect(runSteps(ctx, await reload(doc), SETTLEMENT_STEPS)).rejects.toThrow(/pendingTx/);
+      await expect(runSteps(ctx, await reload(doc), PROVIDER_STEPS)).rejects.toThrow(/pendingTx/);
     } finally {
       ctx.setBlockHeight(Number.MAX_SAFE_INTEGER);
     }
@@ -269,13 +269,13 @@ describe('settlement steps 1–3', () => {
       const doc = await open(model._id);
 
       ctx.chain[crash]('transferUsdc');
-      await expect(runSteps(ctx, doc, SETTLEMENT_STEPS)).rejects.toThrow();
+      await expect(runSteps(ctx, doc, PROVIDER_STEPS)).rejects.toThrow();
       const crashed = await reload(doc);
       expect(crashed.pendingTx).not.toBeNull();
       expect(crashed.revenueMicroUsdc).toBe(micro(10));
 
       await addRequest(model._id, micro(20), new Date(P0.getTime() + 60_000));
-      await runSteps(ctx, crashed, SETTLEMENT_STEPS);
+      await runSteps(ctx, crashed, PROVIDER_STEPS);
 
       const saved = await reload(doc);
       expect(saved.state).toBe('paid_provider');

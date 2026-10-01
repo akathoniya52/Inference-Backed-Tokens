@@ -47,6 +47,7 @@ const tokenSchema = new Schema(
     launchSignature: { type: String, default: null },
     migrationSignature: { type: String, default: null },
     keeperPosition: { type: String, default: null },
+    keeperPositionNftAccount: { type: String, default: null },
     escrowBaseUnits: { type: BigInt, required: true, default: 0n },
     carryOverMicroUsdc: { type: BigInt, required: true, default: 0n },
     sliceCarryOverMicroUsdc: { type: BigInt, required: true, default: 0n },

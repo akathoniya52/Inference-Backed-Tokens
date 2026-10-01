@@ -48,7 +48,10 @@ export function ModelCard({ model }: { model: Model }) {
               {model.name}
             </Link>
           </h2>
-          <p className="mt-1 truncate font-mono text-xs text-ink-400">{model.slug}</p>
+          <p className="mt-1 truncate font-mono text-xs text-ink-400">
+            {token.symbol !== null && <span className="mr-2 text-accent">${token.symbol}</span>}
+            {model.slug}
+          </p>
         </div>
         <PhaseBadge status={token.status} />
       </div>

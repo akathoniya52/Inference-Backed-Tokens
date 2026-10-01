@@ -34,7 +34,8 @@ describe('ExplorePage', () => {
     const curveCard = within(cards[0] as HTMLElement);
     const link = curveCard.getByRole('link', { name: curveModel.name });
     expect(link.getAttribute('href')).toBe(`/t/${curveModel.slug}`);
-    expect(curveCard.getByText(curveModel.slug)).toBeTruthy();
+    expect(curveCard.getByText(curveModel.slug, { exact: false })).toBeTruthy();
+    expect(curveCard.getByText('$LLAMA8')).toBeTruthy();
     expect(curveCard.getByText('$0.20')).toBeTruthy();
     expect(curveCard.getByText('$0.60')).toBeTruthy();
     expect(curveCard.getByText('1,180')).toBeTruthy();
@@ -94,7 +95,7 @@ describe('ExplorePage', () => {
 
     const alert = await screen.findByRole('alert');
     expect(within(alert).getByText('Could not load models')).toBeTruthy();
-    expect(within(alert).getByText(/internal error/)).toBeTruthy();
+    expect(within(alert).getByText(/internal error · request req_1/)).toBeTruthy();
 
     fetchSpy.mockRestore();
     mockApi([{ path: PAGE_1, body: emptyModels }]);

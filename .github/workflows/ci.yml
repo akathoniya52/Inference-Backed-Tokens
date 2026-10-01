@@ -55,13 +55,46 @@ jobs:
       - run: corepack pnpm test
       - run: corepack pnpm build
 
+      - name: Install Playwright Chromium
+        run: corepack pnpm --filter @ibt/web exec playwright install --with-deps chromium
+
+      - name: Playwright smoke (public pages, stubbed api; @staging skipped without STAGING_URL)
+        run: corepack pnpm --filter @ibt/web e2e
+
+      - name: Upload Playwright results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: |
+            apps/web/test-results
+            apps/web/playwright-report
+          if-no-files-found: ignore
+
+  docker:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t ibt .
+
+      - name: Version check
+        run: docker run --rm ibt node apps/api/dist/main.js --version-check
+
   nightly-devnet-e2e:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       DEVNET_E2E: '1'
+      CLUSTER: devnet
       DEVNET_RPC_URL: ${{ secrets.DEVNET_RPC_URL }}
+      RPC_URL: ${{ secrets.DEVNET_RPC_URL }}
+      JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
+      MONGODB_URI: mongodb://localhost:27017/ibt?replicaSet=rs0&directConnection=true
     steps:
       - uses: actions/checkout@v4
 
@@ -72,7 +105,30 @@ jobs:
       - name: Enable pnpm via corepack
         run: corepack enable
 
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
       - run: corepack pnpm install --frozen-lockfile
+
+      - name: Skip notice
+        if: env.DEVNET_RPC_URL == ''
+        run: echo "DEVNET_RPC_URL secret is not set; devnet e2e skipped."
+
+      # The script's keys are throwaway and live in memory only; settle:once
+      # loads apps/keeper/.env, whose placeholders the script overrides.
+      - name: Start mongo and the keeper env file
+        if: env.DEVNET_RPC_URL != ''
+        run: |
+          docker compose up -d --wait mongo
+          cp apps/keeper/.env.example apps/keeper/.env
 
       - name: Devnet e2e (skipped unless the DEVNET_RPC_URL secret is set)
         if: env.DEVNET_RPC_URL != ''

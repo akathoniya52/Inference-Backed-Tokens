@@ -5,3 +5,4 @@ export * from './rpc.js';
 export * from './deposit.js';
 export * from './config.js';
 export * from './send.js';
+export * from './dbc.js';

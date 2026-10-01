@@ -1,0 +1,11 @@
+{
+  "poolState": {
+    "config": "7rLeZgYqNk8qwWRMpLUw9hoJMDtRtBPXHvUQ4TWVDyvc",
+    "creator": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+    "baseMint": "AeKcMHrG6M4ydgaH9twWRSDQqMQyXJUsBjxBPK3cUv4F",
+    "quoteReserve": "2500000000",
+    "baseReserve": "650000000000000",
+    "isMigrated": 0,
+    "metrics": { "totalTradingBaseFee": "0", "totalTradingQuoteFee": "42000000" }
+  }
+}

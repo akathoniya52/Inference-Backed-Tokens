@@ -46,6 +46,7 @@ export {
   BaseFeeMode,
   buildCurve,
   CollectFeeMode,
+  convertToLamports,
   CreatorService,
   DAMM_V2_MIGRATION_FEE_ADDRESS,
   DAMM_V2_PROGRAM_ID,

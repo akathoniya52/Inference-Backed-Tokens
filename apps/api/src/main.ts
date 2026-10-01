@@ -2,8 +2,8 @@ import './version-check.js';
 
 import type { ChainClient } from '@ibt/chain';
 import { RealChainClient, USDC_MINT } from '@ibt/chain';
-import { createFakeChain } from '@ibt/chain/testing';
-import { connectDb, disconnectDb, syncAllIndexes } from '@ibt/db';
+import { createFakeChain, type FakeChainTx } from '@ibt/chain/testing';
+import { connectDb, connection, disconnectDb, syncAllIndexes } from '@ibt/db';
 import { createLogAlerter, createLogger } from '@ibt/shared/node';
 
 import { createApp } from './app.js';
@@ -13,7 +13,15 @@ const SHUTDOWN_GRACE_MS = 10_000;
 
 function buildChain(env: ApiEnv): ChainClient {
   const usdcMint = USDC_MINT[env.CLUSTER];
-  if (env.CHAIN_MODE === 'fake') return createFakeChain({ usdcMint });
+  if (env.CHAIN_MODE === 'fake') {
+    const db = connection.db;
+    if (!db) throw new Error('connectDb must run before buildChain');
+    // Shares `fakeChainPools`/`fakeChainTxs` with seed-models and the keeper on the same Mongo.
+    return createFakeChain({
+      usdcMint,
+      mongo: { collection: (name) => db.collection<FakeChainTx>(name) },
+    });
+  }
   return new RealChainClient({
     rpcUrl: env.RPC_URL,
     ...(env.RPC_URL_FALLBACK ? { fallbackUrl: env.RPC_URL_FALLBACK } : {}),

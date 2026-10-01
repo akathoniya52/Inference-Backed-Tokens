@@ -6,7 +6,14 @@ import type { ChainClient } from '../src/client.js';
 import { FakePriceSource } from '../src/price.js';
 import { USDC_MINT } from '../src/sdk.js';
 import { ataOf } from '../src/spl.js';
-import { createFakeChain, type FakeChainMongo, type FakeChainTx } from '../src/testing.js';
+import {
+  createFakeChain,
+  FAKE_POOLS_COLLECTION,
+  type FakeChainMongo,
+  type FakeChainTx,
+  loadFakeSolUsd,
+  saveFakeSolUsd,
+} from '../src/testing.js';
 import { loadDepositFixture } from '../src/testing/fixtures.js';
 
 const keeper = Keypair.generate();
@@ -209,5 +216,60 @@ describe('createFakeChain', () => {
     expect(await restarted.signatureStatus(signature)).toBe('landed');
     expect(await restarted.signatureStatus('unknown-sig')).toBe('unknown');
     expect(await restarted.landedTxs({ settlementRef: 'settlement-1' })).toHaveLength(1);
+  });
+
+  it('loads persisted pools and the seeded SOL price in a fresh instance', async () => {
+    const tables = new Map<string, Record<string, unknown>[]>();
+    const table = (name: string) => tables.get(name) ?? tables.set(name, []).get(name) ?? [];
+    const matches = (filter: object) => (row: Record<string, unknown>) =>
+      Object.entries(filter).every(([k, v]) => row[k] === v);
+    const mongo: FakeChainMongo = {
+      collection: (name: string) => ({
+        insertOne: (doc: FakeChainTx) => {
+          table(name).push({ ...doc });
+          return Promise.resolve({ acknowledged: true });
+        },
+        findOne: (filter: Partial<FakeChainTx>) =>
+          Promise.resolve(table(name).find(matches(filter)) ?? null),
+        find: (filter: Partial<FakeChainTx>) => ({
+          toArray: () => Promise.resolve(table(name).filter(matches(filter))),
+        }),
+        replaceOne: (filter: Partial<FakeChainTx>, doc: object) => {
+          const rows = table(name);
+          const index = rows.findIndex(matches(filter));
+          if (index === -1) rows.push({ ...doc });
+          else rows[index] = { ...doc };
+          return Promise.resolve({ acknowledged: true });
+        },
+      }),
+    };
+
+    expect(await loadFakeSolUsd(mongo)).toBeNull();
+    await saveFakeSolUsd(mongo, 175);
+    expect(await loadFakeSolUsd(mongo)).toBe(175);
+
+    const seeder = createFakeChain({ mongo, usdcMint: usdc });
+    const address = await seeder.addPersistedPool({ mint, config, creator: provider });
+    expect(await seeder.addPersistedPool({ mint, config, creator: provider })).toEqual(address);
+    expect(tables.get(FAKE_POOLS_COLLECTION)).toHaveLength(1);
+
+    const keeperProcess = createFakeChain({ mongo, usdcMint: usdc });
+    keeperProcess.setSol(keeper.publicKey, 5_000n);
+    expect(await keeperProcess.readPool({ pool: address })).toMatchObject({
+      baseMint: mint.toBase58(),
+      quoteReserve: '0',
+      isMigrated: false,
+    });
+    await keeperProcess.curveBuy(keeper, address, 2_000n);
+
+    const nextRun = createFakeChain({ mongo, usdcMint: usdc });
+    expect(await nextRun.readPool({ mint, config })).toMatchObject({ quoteReserve: '2000' });
+    expect(tables.get(FAKE_POOLS_COLLECTION)).toHaveLength(1);
+  });
+
+  it('refuses to persist a pool without the mongo option', async () => {
+    await expect(
+      createFakeChain().addPersistedPool({ mint, config, creator: provider }),
+    ).rejects.toThrow('mongo option');
   });
 });

@@ -31,12 +31,36 @@ export interface FakeChainTx {
   ts: Date;
 }
 
+/** A DBC pool persisted in `fakeChainPools` so other processes (keeper, api) can read it. */
+export interface FakeChainPoolRow {
+  mint: string;
+  address: string;
+  config: string;
+  creator: string;
+  quoteReserve: string;
+  baseReserve: string;
+  isMigrated: boolean;
+  dammLiquidity: string | null;
+}
+
+/** The fake SOL price persisted in `fakeChainPrices`, keyed by the WSOL mint. */
+export interface FakeChainPriceRow {
+  mint: string;
+  usd: number;
+}
+
 /** Structural slice of a Mongo/mongoose connection; `@ibt/chain` never imports mongoose (G11). */
 export interface FakeChainMongo {
   collection(name: string): {
     insertOne(doc: FakeChainTx): Promise<unknown>;
     findOne(filter: Partial<FakeChainTx>): Promise<unknown>;
     find(filter: Partial<FakeChainTx>): { toArray(): Promise<unknown[]> };
+    /** Needed only to persist pools and prices (`addPersistedPool`, `saveFakeSolUsd`). */
+    replaceOne?(
+      filter: Partial<FakeChainTx>,
+      doc: FakeChainTx | FakeChainPoolRow | FakeChainPriceRow,
+      options: { upsert: boolean },
+    ): Promise<unknown>;
   };
 }
 
@@ -62,9 +86,13 @@ interface FakePool {
   baseReserve: bigint;
   isMigrated: boolean;
   dammLiquidity: bigint | null;
+  /** Loaded from or saved to `fakeChainPools`; state changes are written back. */
+  persisted?: boolean;
 }
 
 const COLLECTION = 'fakeChainTxs';
+export const FAKE_POOLS_COLLECTION = 'fakeChainPools';
+export const FAKE_PRICES_COLLECTION = 'fakeChainPrices';
 const SOL = 'SOL';
 /** Fixed fake exchange rate: model token base units per lamport. */
 export const FAKE_TOKENS_PER_LAMPORT = 1000n;
@@ -75,6 +103,53 @@ const isTxRow = (row: unknown): row is FakeChainTx =>
   row !== null &&
   'signature' in row &&
   typeof row.signature === 'string';
+
+const isPoolRow = (row: unknown): row is FakeChainPoolRow =>
+  typeof row === 'object' &&
+  row !== null &&
+  'mint' in row &&
+  typeof row.mint === 'string' &&
+  'address' in row &&
+  typeof row.address === 'string' &&
+  'config' in row &&
+  typeof row.config === 'string' &&
+  'creator' in row &&
+  typeof row.creator === 'string' &&
+  'quoteReserve' in row &&
+  typeof row.quoteReserve === 'string' &&
+  'baseReserve' in row &&
+  typeof row.baseReserve === 'string' &&
+  'isMigrated' in row &&
+  typeof row.isMigrated === 'boolean' &&
+  'dammLiquidity' in row &&
+  (row.dammLiquidity === null || typeof row.dammLiquidity === 'string');
+
+async function upsertByMint(
+  mongo: FakeChainMongo,
+  name: string,
+  doc: FakeChainPoolRow | FakeChainPriceRow,
+): Promise<void> {
+  const collection = mongo.collection(name);
+  if (!collection.replaceOne) {
+    throw new Error(`fake chain: the ${name} collection has no replaceOne`);
+  }
+  await collection.replaceOne({ mint: doc.mint }, doc, { upsert: true });
+}
+
+/** Stores the SOL price a `CHAIN_MODE=fake` process should use (see `loadFakeSolUsd`). */
+export async function saveFakeSolUsd(mongo: FakeChainMongo, usd: number): Promise<void> {
+  if (!Number.isFinite(usd) || usd <= 0) throw new RangeError('usd must be a positive number');
+  await upsertByMint(mongo, FAKE_PRICES_COLLECTION, { mint: NATIVE_MINT.toBase58(), usd });
+}
+
+/** The SOL price saved by `saveFakeSolUsd`, or null when none was seeded. */
+export async function loadFakeSolUsd(mongo: FakeChainMongo): Promise<number | null> {
+  const row = await mongo
+    .collection(FAKE_PRICES_COLLECTION)
+    .findOne({ mint: NATIVE_MINT.toBase58() });
+  if (typeof row !== 'object' || row === null || !('usd' in row)) return null;
+  return typeof row.usd === 'number' && Number.isFinite(row.usd) && row.usd > 0 ? row.usd : null;
+}
 
 export class FakeChain implements ChainClient {
   readonly calls: FakeChainCall[] = [];
@@ -90,6 +165,7 @@ export class FakeChain implements ChainClient {
   private readonly crashAfterLanding = new Set<string>();
   private threshold = 10_000_000_000n;
   private blockHeight = 1000;
+  private hydrated: Promise<void> | null = null;
 
   constructor(opts: FakeChainOptions = {}) {
     this.mongo = opts.mongo;
@@ -109,6 +185,22 @@ export class FakeChain implements ChainClient {
       isMigrated: false,
       dammLiquidity: null,
     });
+    return address;
+  }
+
+  /** `addPool`, also saved to `fakeChainPools` so a fresh instance on the same Mongo sees it. */
+  async addPersistedPool(input: {
+    mint: PublicKey;
+    config: PublicKey;
+    creator: PublicKey;
+  }): Promise<PublicKey> {
+    await this.hydrate();
+    const existing = this.pools.get(input.mint.toBase58());
+    if (existing?.persisted && existing.config.equals(input.config)) return existing.address;
+    const address = this.addPool(input);
+    const pool = this.requirePool({ pool: address });
+    pool.persisted = true;
+    await this.savePool(pool);
     return address;
   }
 
@@ -183,8 +275,9 @@ export class FakeChain implements ChainClient {
     );
   }
 
-  verifyLaunch(input: VerifyLaunchInput): Promise<{ pool: string }> {
+  async verifyLaunch(input: VerifyLaunchInput): Promise<{ pool: string }> {
     this.record('verifyLaunch', [input]);
+    await this.hydrate();
     const pool = this.pools.get(input.mint.toBase58());
     const reason = !pool
       ? 'pool_not_found'
@@ -194,30 +287,30 @@ export class FakeChain implements ChainClient {
           ? 'creator'
           : null;
     if (reason || !pool) {
-      return Promise.reject(
-        new AppError('pool_mismatch', { details: { reason: reason ?? 'pool_not_found' } }),
-      );
+      throw new AppError('pool_mismatch', { details: { reason: reason ?? 'pool_not_found' } });
     }
-    return Promise.resolve({ pool: pool.address.toBase58() });
+    return { pool: pool.address.toBase58() };
   }
 
-  readPool(ref: PoolRef): Promise<DbcPoolDto | null> {
+  async readPool(ref: PoolRef): Promise<DbcPoolDto | null> {
     this.record('readPool', [ref]);
+    await this.hydrate();
     const pool = this.poolByRef(ref);
-    return Promise.resolve(pool && this.dto(pool));
+    return pool && this.dto(pool);
   }
 
-  readDammPool(mint: PublicKey): Promise<DammPoolDto | null> {
+  async readDammPool(mint: PublicKey): Promise<DammPoolDto | null> {
     this.record('readDammPool', [mint]);
+    await this.hydrate();
     const pool = this.pools.get(mint.toBase58());
-    if (!pool || pool.dammLiquidity === null) return Promise.resolve(null);
-    return Promise.resolve({
+    if (!pool || pool.dammLiquidity === null) return null;
+    return {
       address: deriveDammPool(mint).toBase58(),
       tokenAMint: mint.toBase58(),
       tokenBMint: NATIVE_MINT.toBase58(),
       liquidity: pool.dammLiquidity.toString(),
       sqrtPrice: '18446744073709551616',
-    });
+    };
   }
 
   tokenBalance(wallet: PublicKey, mint: PublicKey): Promise<bigint> {
@@ -261,6 +354,7 @@ export class FakeChain implements ChainClient {
     opts?: SendOpts & { slippageBps?: number },
   ): Promise<TxResult & { outAmount: bigint }> {
     this.record('curveBuy', [keeper.publicKey, poolAddress, lamports, opts]);
+    await this.hydrate();
     const pool = this.requirePool({ pool: poolAddress });
     const room = this.threshold - pool.quoteReserve;
     if (pool.isMigrated || room <= 0n) throw new Error('fake chain: curve is complete');
@@ -271,6 +365,7 @@ export class FakeChain implements ChainClient {
       to: poolAddress,
       amount: spent,
       mint: NATIVE_MINT,
+      pool,
       apply: () => {
         pool.quoteReserve += spent;
         pool.baseReserve -= outAmount;
@@ -281,17 +376,17 @@ export class FakeChain implements ChainClient {
     return { signature, outAmount };
   }
 
-  migrate(keeper: Signer, poolAddress: PublicKey, opts?: SendOpts): Promise<TxResult> {
+  async migrate(keeper: Signer, poolAddress: PublicKey, opts?: SendOpts): Promise<TxResult> {
     this.record('migrate', [keeper.publicKey, poolAddress, opts]);
+    await this.hydrate();
     const pool = this.requirePool({ pool: poolAddress });
-    if (pool.quoteReserve < this.threshold) {
-      return Promise.reject(new Error('fake chain: curve is not complete'));
-    }
+    if (pool.quoteReserve < this.threshold) throw new Error('fake chain: curve is not complete');
     return this.send('migrate', 'migrate', opts, {
       from: keeper.publicKey,
       to: poolAddress,
       amount: 0n,
       mint: pool.mint,
+      pool,
       apply: () => {
         pool.isMigrated = true;
         pool.dammLiquidity = pool.quoteReserve;
@@ -306,6 +401,7 @@ export class FakeChain implements ChainClient {
     opts?: SendOpts,
   ): Promise<TxResult & { outAmount: bigint }> {
     this.record('dammSwap', [keeper.publicKey, mint, swap, opts]);
+    await this.hydrate();
     this.requireDamm(mint);
     const solIn = swap.inputMint.equals(NATIVE_MINT);
     const outAmount = solIn
@@ -331,6 +427,7 @@ export class FakeChain implements ChainClient {
     opts?: SendOpts,
   ): Promise<AddAndLockResult> {
     this.record('addAndLock', [keeper.publicKey, mint, input, opts]);
+    await this.hydrate();
     const pool = this.requireDamm(mint);
     let lamportsUsed = input.lamports;
     let tokensUsed = lamportsUsed * FAKE_TOKENS_PER_LAMPORT;
@@ -348,6 +445,7 @@ export class FakeChain implements ChainClient {
       to: pool58,
       amount: lamportsUsed,
       mint: NATIVE_MINT,
+      pool,
       apply: () => {
         this.move(keeper.publicKey, SOL, -lamportsUsed);
         this.move(keeper.publicKey, mint, -tokensUsed);
@@ -371,13 +469,14 @@ export class FakeChain implements ChainClient {
     };
   }
 
-  claimPositionFee(
+  async claimPositionFee(
     keeper: Signer,
     mint: PublicKey,
     position: PositionKeys,
     opts?: SendOpts,
   ): Promise<TxResult> {
     this.record('claimPositionFee', [keeper.publicKey, mint, position, opts]);
+    await this.hydrate();
     this.requireDamm(mint);
     return this.send('claimPositionFee', 'claimPositionFee', opts, {
       from: position.position,
@@ -394,6 +493,45 @@ export class FakeChain implements ChainClient {
     if (!this.mongo) return 'unknown';
     const row = await this.mongo.collection(COLLECTION).findOne({ signature });
     return isTxRow(row) ? 'landed' : 'unknown';
+  }
+
+  /** Loads `fakeChainPools` once; pools already in memory win. */
+  private hydrate(): Promise<void> {
+    this.hydrated ??= this.loadPools();
+    return this.hydrated;
+  }
+
+  private async loadPools(): Promise<void> {
+    if (!this.mongo) return;
+    const rows = await this.mongo.collection(FAKE_POOLS_COLLECTION).find({}).toArray();
+    for (const row of rows.filter(isPoolRow)) {
+      if (this.pools.has(row.mint)) continue;
+      this.pools.set(row.mint, {
+        address: new PublicKey(row.address),
+        mint: new PublicKey(row.mint),
+        config: new PublicKey(row.config),
+        creator: new PublicKey(row.creator),
+        quoteReserve: BigInt(row.quoteReserve),
+        baseReserve: BigInt(row.baseReserve),
+        isMigrated: row.isMigrated,
+        dammLiquidity: row.dammLiquidity === null ? null : BigInt(row.dammLiquidity),
+        persisted: true,
+      });
+    }
+  }
+
+  private async savePool(pool: FakePool): Promise<void> {
+    if (!this.mongo) throw new Error('fake chain: persisting a pool needs the mongo option');
+    await upsertByMint(this.mongo, FAKE_POOLS_COLLECTION, {
+      mint: pool.mint.toBase58(),
+      address: pool.address.toBase58(),
+      config: pool.config.toBase58(),
+      creator: pool.creator.toBase58(),
+      quoteReserve: pool.quoteReserve.toString(),
+      baseReserve: pool.baseReserve.toString(),
+      isMigrated: pool.isMigrated,
+      dammLiquidity: pool.dammLiquidity === null ? null : pool.dammLiquidity.toString(),
+    });
   }
 
   private record(method: FakeChainMethod, args: unknown[]): void {
@@ -453,7 +591,14 @@ export class FakeChain implements ChainClient {
     method: FakeChainMethod,
     step: string,
     opts: SendOpts | undefined,
-    tx: { from: PublicKey; to: PublicKey; amount: bigint; mint: PublicKey; apply: () => void },
+    tx: {
+      from: PublicKey;
+      to: PublicKey;
+      amount: bigint;
+      mint: PublicKey;
+      pool?: FakePool;
+      apply: () => void;
+    },
   ): Promise<TxResult> {
     const failures = this.failures.get(method) ?? 0;
     if (failures > 0) {
@@ -480,6 +625,7 @@ export class FakeChain implements ChainClient {
     };
     this.txs.push(row);
     await this.mongo?.collection(COLLECTION).insertOne(row);
+    if (tx.pool?.persisted) await this.savePool(tx.pool);
 
     if (this.crashAfterLanding.delete(method)) {
       throw new Error(`fake crash after ${method} landed`);

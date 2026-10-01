@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "create-config": "tsx --conditions=development create-config.ts"
+  },
   "dependencies": {
     "@ibt/chain": "workspace:*",
     "@ibt/db": "workspace:*",

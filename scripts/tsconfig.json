@@ -5,7 +5,7 @@
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
     "types": ["node"]
   },
-  "include": ["*.ts", "load/**/*.ts"],
+  "include": ["*.ts", "lib/**/*.ts", "load/**/*.ts"],
   "references": [
     { "path": "../packages/shared" },
     { "path": "../packages/db" },

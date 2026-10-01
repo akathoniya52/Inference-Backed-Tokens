@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly devnet end-to-end (only runs when the DEVNET_RPC_URL secret exists).
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MONGOMS_VERSION: 7.0.14
+
+jobs:
+  ci:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.2
+
+      - name: Enable pnpm via corepack
+        run: corepack enable && corepack pnpm --version
+
+      - name: Resolve pnpm store path
+        id: pnpm-store
+        run: echo "path=$(corepack pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      - name: Cache MongoDB binaries (mongodb-memory-server)
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.cache/mongodb-memory-server
+          key: mongoms-${{ runner.os }}-${{ env.MONGOMS_VERSION }}
+
+      - run: corepack pnpm install --frozen-lockfile
+      - run: corepack pnpm lint
+      - run: corepack pnpm format:check
+      - run: corepack pnpm typecheck
+      - run: corepack pnpm test
+      - run: corepack pnpm build
+
+  nightly-devnet-e2e:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEVNET_E2E: '1'
+      DEVNET_RPC_URL: ${{ secrets.DEVNET_RPC_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.20.2
+
+      - name: Enable pnpm via corepack
+        run: corepack enable
+
+      - run: corepack pnpm install --frozen-lockfile
+
+      - name: Devnet e2e (skipped unless the DEVNET_RPC_URL secret is set)
+        if: env.DEVNET_RPC_URL != ''
+        run: corepack pnpm exec tsx --conditions=development scripts/devnet-e2e.ts

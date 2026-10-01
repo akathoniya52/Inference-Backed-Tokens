@@ -6,3 +6,5 @@ export const PACKAGE_NAME = '@ibt/shared';
  * condition (TypeScript source) rather than `dist`.
  */
 export const SHARED_SOURCE_URL = import.meta.url;
+
+export * from './constants.js';

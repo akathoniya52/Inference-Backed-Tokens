@@ -54,6 +54,7 @@ export interface MakeTestAppOptions {
   now?: Date;
   timeouts?: AppDeps['timeouts'];
   extraRoutes?: AppDeps['extraRoutes'];
+  logger?: AppDeps['logger'];
 }
 
 export function createTestClock(start = new Date()): TestClock {
@@ -127,6 +128,7 @@ export async function makeTestApp(opts: MakeTestAppOptions = {}): Promise<TestAp
     clock: () => clock.now(),
     ...(opts.timeouts ? { timeouts: opts.timeouts } : {}),
     ...(opts.extraRoutes ? { extraRoutes: opts.extraRoutes } : {}),
+    ...(opts.logger ? { logger: opts.logger } : {}),
   });
   let closed = false;
   return {

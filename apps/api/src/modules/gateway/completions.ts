@@ -1,4 +1,4 @@
-import { Requests, capture, hold, release, type RequestRecord } from '@ibt/db';
+import { Requests, Types, capture, hold, release, type RequestRecord } from '@ibt/db';
 import {
   AppError,
   ChatCompletionResponseSchema,
@@ -134,6 +134,33 @@ function usageOf(
   };
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * G21: today's (UTC) billed cost on this key must be below its cap before a new
+ * hold. Matches on `{userId, createdAt}` (indexed), then narrows to the key.
+ */
+async function assertUnderDailyCap(ctx: AppContext, key: ApiKeyContext): Promise<void> {
+  const now = ctx.clock().getTime();
+  const dayStart = new Date(now - (now % DAY_MS));
+  const [row] = await Requests.aggregate<{ spent: bigint | number }>([
+    {
+      $match: {
+        userId: new Types.ObjectId(key.userId),
+        createdAt: { $gte: dayStart },
+        apiKeyId: new Types.ObjectId(key.apiKeyId),
+      },
+    },
+    { $group: { _id: null, spent: { $sum: '$costMicroUsdc' } } },
+  ]);
+  const spent = row ? BigInt(row.spent) : 0n;
+  if (spent >= key.dailyCapMicroUsdc) {
+    throw new AppError('daily_cap_exceeded', {
+      details: { dailyCapUsdc: microToUsdcString(key.dailyCapMicroUsdc) },
+    });
+  }
+}
+
 /**
  * Gateway steps 3–6 (L236–239) for a non-streaming call: hold the worst case,
  * forward, then capture the actual cost or release the hold on failure.
@@ -146,6 +173,8 @@ export async function completeChat(
   if (await Requests.exists({ requestId })) {
     throw new AppError('invalid_request', { message: 'X-Request-Id was already used' });
   }
+
+  await assertUnderDailyCap(ctx, key);
 
   const pricing = {
     inPrice: model.pricing.inputPerMTokMicroUsdc,

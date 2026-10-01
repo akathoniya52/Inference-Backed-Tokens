@@ -4,6 +4,7 @@ import { Models, Users, type ModelFields, type Types } from '@ibt/db';
 import {
   AppError,
   ChatCompletionRequestSchema,
+  RATE_LIMIT_PER_MIN,
   effectiveMaxTokens,
   microToUsdcString,
   type ChatCompletionRequest,
@@ -14,6 +15,7 @@ import { Router } from 'express';
 import type { AppContext } from '../../app.js';
 import { getRequestId, requireApiKeyContext } from '../../context.js';
 import { apiKeyAuth } from '../../middleware/apiKeyAuth.js';
+import { createRateLimit } from '../../middleware/rateLimit.js';
 import { parseInput } from '../../validate.js';
 import { completeChat } from './completions.js';
 
@@ -74,6 +76,13 @@ async function listActiveModels(): Promise<GatewayModelList> {
 export function gatewayRouter(ctx: AppContext): Router {
   const router = Router();
   router.use(apiKeyAuth(ctx));
+  // L517: per key, after auth, so one client's keys never share a bucket.
+  router.use(
+    createRateLimit({
+      limit: ctx.env.RATE_LIMIT_PER_MIN ?? RATE_LIMIT_PER_MIN,
+      keyGenerator: (req) => requireApiKeyContext(req).apiKeyId,
+    }),
+  );
 
   router.get('/models', async (_req, res) => {
     res.json(await listActiveModels());

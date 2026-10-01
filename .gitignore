@@ -8,3 +8,5 @@ coverage
 id.json
 .DS_Store
 *.tsbuildinfo
+apps/web/test-results
+apps/web/playwright-report

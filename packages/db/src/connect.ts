@@ -9,6 +9,8 @@ export interface ConnectOptions {
 export async function connectDb(uri: string, opts: ConnectOptions = {}): Promise<typeof mongoose> {
   return mongoose.connect(uri, {
     serverSelectionTimeoutMS: opts.serverSelectionTimeoutMS ?? 10_000,
+    // int64 money fields decode as bigint in lean reads and aggregations too.
+    useBigInt64: true,
   });
 }
 

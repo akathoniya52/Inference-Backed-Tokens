@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { periodFromStart } from '../src/settlement/period.js';
 import {
+  LIQUIDITY_STEPS,
   PROVIDER_STEPS,
-  SETTLEMENT_STEPS,
   buyAndLock,
   convert,
   convertSlice,
@@ -22,6 +22,8 @@ const at = (hours: number) => new Date(P0.getTime() + hours * HOUR);
 /** 10 USDC revenue → 2 USDC slice → 13_333_333 lamports at 150 USD/SOL. */
 const SLICE_LAMPORTS = 13_333_333n;
 const DEFAULT_THRESHOLD = 10_000_000_000n;
+/** Steps 2–5; `compound` and `finalize` are covered by the engine and suite tests. */
+const STEPS_2_TO_5 = [...PROVIDER_STEPS, ...LIQUIDITY_STEPS];
 let reqSeq = 0;
 
 describe('settlement steps 4–5', () => {
@@ -102,7 +104,7 @@ describe('settlement steps 4–5', () => {
   it('curve: converts at the stored rate, buys, adds the tokens to escrow and ends locked', async () => {
     const { model, pool } = await createTestModel(ctx, 'curve');
     const doc = await open(model._id);
-    await runSteps(ctx, doc, SETTLEMENT_STEPS);
+    await runSteps(ctx, doc, STEPS_2_TO_5);
 
     const saved = await reload(doc);
     expect(saved.state).toBe('locked');
@@ -131,7 +133,7 @@ describe('settlement steps 4–5', () => {
     const buysBefore = callsOf('curveBuy').length;
     try {
       const first = await open(model._id);
-      await runSteps(ctx, first, SETTLEMENT_STEPS);
+      await runSteps(ctx, first, STEPS_2_TO_5);
       const s1 = await reload(first);
       expect(s1.state).toBe('done');
       expect(s1.liquidity.phase).toBe('none');
@@ -140,7 +142,7 @@ describe('settlement steps 4–5', () => {
       expect((await token(model._id)).sliceCarryOverMicroUsdc).toBe(micro(2));
 
       const second = await open(model._id, at(1));
-      await runSteps(ctx, second, SETTLEMENT_STEPS);
+      await runSteps(ctx, second, STEPS_2_TO_5);
       expect((await reload(second)).state).toBe('done');
       expect((await token(model._id)).sliceCarryOverMicroUsdc).toBe(micro(4));
     } finally {
@@ -149,7 +151,7 @@ describe('settlement steps 4–5', () => {
     expect(callsOf('curveBuy').length).toBe(buysBefore);
 
     const third = await open(model._id, at(2));
-    await runSteps(ctx, third, SETTLEMENT_STEPS);
+    await runSteps(ctx, third, STEPS_2_TO_5);
     const s3 = await reload(third);
     expect(s3.state).toBe('locked');
     expect(s3.liquidity.solLamports).toBe(40_000_000n);
@@ -162,7 +164,7 @@ describe('settlement steps 4–5', () => {
     const cap = ctx.config.maxSliceLamports;
     ctx.config.maxSliceLamports = 5_000_000n;
     try {
-      await runSteps(ctx, doc, SETTLEMENT_STEPS);
+      await runSteps(ctx, doc, STEPS_2_TO_5);
     } finally {
       ctx.config.maxSliceLamports = cap;
     }
@@ -176,14 +178,14 @@ describe('settlement steps 4–5', () => {
     const { model } = await createTestModel(ctx, 'curve');
     const doc = await open(model._id);
     ctx.chain.crashAfterLand('curveBuy');
-    await expect(runSteps(ctx, doc, SETTLEMENT_STEPS)).rejects.toThrow(/landed/);
+    await expect(runSteps(ctx, doc, STEPS_2_TO_5)).rejects.toThrow(/landed/);
     const crashed = await reload(doc);
     expect(crashed.state).toBe('converted');
     expect(crashed.pendingTx?.step).toBe('buyAndLock:curveBuy');
     const landedSig = crashed.pendingTx?.signature;
     const buys = callsOf('curveBuy').length;
 
-    await runSteps(ctx, crashed, SETTLEMENT_STEPS);
+    await runSteps(ctx, crashed, STEPS_2_TO_5);
     const saved = await reload(doc);
     expect(callsOf('curveBuy').length).toBe(buys);
     expect(saved.state).toBe('locked');
@@ -199,7 +201,7 @@ describe('settlement steps 4–5', () => {
     const doc = await open(model._id);
     await runSteps(ctx, doc, PROVIDER_STEPS);
     const callsBefore = ctx.chain.calls.length;
-    await runSteps(ctx, doc, SETTLEMENT_STEPS);
+    await runSteps(ctx, doc, STEPS_2_TO_5);
 
     const saved = await reload(doc);
     expect(saved.state).toBe('locked');
@@ -217,7 +219,7 @@ describe('settlement steps 4–5', () => {
     ctx.chain.migrateWhen(threshold);
     try {
       const s0 = await open(model._id);
-      await runSteps(ctx, s0, SETTLEMENT_STEPS);
+      await runSteps(ctx, s0, STEPS_2_TO_5);
       const r0 = await reload(s0);
       expect(r0.state).toBe('locked');
       expect(r0.liquidity.solAddedLamports).toBe(threshold);
@@ -273,11 +275,11 @@ describe('settlement steps 4–5', () => {
       // add lands rebuilds only the add (the swap is recorded and never resent).
       const s2 = await open(model._id, at(2));
       ctx.chain.crashAfter('addAndLock');
-      await expect(runSteps(ctx, s2, SETTLEMENT_STEPS)).rejects.toThrow(/addAndLock/);
+      await expect(runSteps(ctx, s2, STEPS_2_TO_5)).rejects.toThrow(/addAndLock/);
       const crashed = await reload(s2);
       expect(crashed.state).toBe('bought');
       expect(crashed.pendingTx?.step).toBe('buyAndLock:addLiquidity');
-      await runSteps(ctx, crashed, SETTLEMENT_STEPS);
+      await runSteps(ctx, crashed, STEPS_2_TO_5);
 
       const r2 = await reload(s2);
       const lamports2 = lamports1 - threshold + SLICE_LAMPORTS;
@@ -327,13 +329,13 @@ describe('settlement steps 4–5', () => {
 
     const doc = await open(model._id);
     ctx.chain.crashAfterLand('addAndLock');
-    await expect(runSteps(ctx, doc, SETTLEMENT_STEPS)).rejects.toThrow(/landed/);
+    await expect(runSteps(ctx, doc, STEPS_2_TO_5)).rejects.toThrow(/landed/);
     const crashed = await reload(doc);
     expect(crashed.pendingTx?.step).toBe('buyAndLock:addLiquidity');
     const adds = callsOf('addAndLock').length;
 
-    await expect(runSteps(ctx, crashed, SETTLEMENT_STEPS)).rejects.toThrow(/without its lock/);
-    await expect(runSteps(ctx, await reload(doc), SETTLEMENT_STEPS)).rejects.toThrow(
+    await expect(runSteps(ctx, crashed, STEPS_2_TO_5)).rejects.toThrow(/without its lock/);
+    await expect(runSteps(ctx, await reload(doc), STEPS_2_TO_5)).rejects.toThrow(
       /without its lock/,
     );
     expect(callsOf('addAndLock').length).toBe(adds);

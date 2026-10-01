@@ -11,6 +11,7 @@ import { POOL_POLLER_CRON, createPoolPoller } from './jobs/poolPoller.js';
 import { createLease } from './lease.js';
 import { buildKeeperCtx } from './runtime.js';
 import { createScheduler } from './scheduler.js';
+import { createOrchestrator } from './settlement/orchestrator.js';
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -25,11 +26,20 @@ async function main(): Promise<void> {
   const scheduler = createScheduler({ logger });
   const poolPoller = createPoolPoller(ctx);
   scheduler.add('poolPoller', POOL_POLLER_CRON, () => poolPoller.tick());
+  const orchestrator = createOrchestrator(ctx);
+  scheduler.add('settle', env.SETTLEMENT_CRON, async () => {
+    await orchestrator.run();
+  });
   const lease = createLease({
     holder: `${hostname()}:${process.pid}`,
     clock: ctx.clock,
     logger,
-    onAcquired: () => scheduler.start(),
+    onAcquired: () => {
+      scheduler.start();
+      // Boot resume (L172): the run's resume scan finishes settlements a crashed holder
+      // left open. Not awaited, so a long run never delays the lease renewal.
+      void scheduler.runNow('settle');
+    },
     onLost: () => scheduler.stop(),
   });
 

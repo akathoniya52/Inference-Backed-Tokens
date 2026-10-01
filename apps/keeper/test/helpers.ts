@@ -1,7 +1,9 @@
 import { createFakeChain, type FakeChain, type FakeChainTx } from '@ibt/chain/testing';
-import { FakePriceSource } from '@ibt/chain';
+import { FakePriceSource, deriveDammPool } from '@ibt/chain';
 import {
   Models,
+  Requests,
+  Types,
   Users,
   connection,
   connectDb,
@@ -109,6 +111,45 @@ export async function createTestModel(
       : {},
   });
   return { model, providerWallet, mint, pool };
+}
+
+let reqSeq = 0;
+
+/** A request row with an explicit `createdAt` (timestamps off). */
+export async function addRequest(
+  modelId: Types.ObjectId,
+  cost: bigint,
+  createdAt: Date,
+  status: 'success' | 'upstream_error' = 'success',
+): Promise<void> {
+  reqSeq += 1;
+  await new Requests({
+    userId: new Types.ObjectId(),
+    apiKeyId: new Types.ObjectId(),
+    modelId,
+    requestId: `req-h-${reqSeq}-${Math.random().toString(36).slice(2, 8)}`,
+    status,
+    costMicroUsdc: cost,
+    createdAt,
+  }).save({ timestamps: false });
+}
+
+/** Default fake-chain curve threshold (`FakeChain.migrateWhen`). */
+export const DEFAULT_THRESHOLD = 10_000_000_000n;
+
+/** Migrates a curve model's fake pool to DAMM v2 and marks the token graduated. */
+export async function graduate(ctx: TestKeeperCtx, { model, mint, pool }: TestModel) {
+  if (!pool) throw new Error('graduate needs a curve model');
+  ctx.chain.migrateWhen(0n);
+  try {
+    await ctx.chain.migrate(ctx.keeper, pool);
+  } finally {
+    ctx.chain.migrateWhen(DEFAULT_THRESHOLD);
+  }
+  await Models.updateOne(
+    { _id: model._id },
+    { $set: { 'token.status': 'graduated', 'token.dammV2Pool': deriveDammPool(mint).toBase58() } },
+  );
 }
 
 /** Connects `@ibt/db` to a fresh database on the shared replica set (one per test file). */

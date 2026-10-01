@@ -67,6 +67,32 @@ export function completeState(settlement: SettlementDoc, state: SettlementState)
 export const tokenPhase = (status: string | null | undefined): TokenPhase =>
   status === 'curve' || status === 'graduated' ? status : 'none';
 
+/** A failure retrying cannot fix; the engine fails the settlement at once and alerts. */
+export class NonRetryableSettlementError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NonRetryableSettlementError';
+  }
+}
+
+/** An add landed but its lock did not: unlocked liquidity needs a manual lock first. */
+export class LiquidityUnlockedError extends NonRetryableSettlementError {
+  constructor(readonly addSignature: string) {
+    super(
+      `liquidity add ${addSignature} landed without its lock; lock the keeper position before retrying`,
+    );
+    this.name = 'LiquidityUnlockedError';
+  }
+}
+
+/** The L375 invariant does not hold for a settlement about to be marked `done`. */
+export class SettlementInvariantError extends NonRetryableSettlementError {
+  constructor(reason: string) {
+    super(`settlement invariant violated: ${reason}`);
+    this.name = 'SettlementInvariantError';
+  }
+}
+
 const isDuplicateKey = (err: unknown): boolean =>
   typeof err === 'object' && err !== null && 'code' in err && err.code === 11000;
 
@@ -539,9 +565,7 @@ async function resumeAddAndLock(
       keys: keeperPosition(model),
     };
   }
-  throw new Error(
-    `liquidity add ${addSignature ?? pending.signature} landed without its lock; lock the keeper position before retrying`,
-  );
+  throw new LiquidityUnlockedError(addSignature ?? pending.signature);
 }
 
 /** Graduated: pair escrow (bought on the curve or just swapped) with SOL, then lock it. */
@@ -678,6 +702,106 @@ export const buyAndLock: SettlementStep = async (ctx, settlement) => {
   });
 };
 
+const gain = (before: bigint, after: bigint): bigint => (after > before ? after - before : 0n);
+
+/**
+ * Step 6: claim the keeper position's fees (L179, G19). The chain client reports no
+ * amounts, so they are the keeper's balance gain across the claim; concurrent sends of
+ * other models only spend SOL, so the measurement can undercount but never overcount.
+ * Lamports compound into the next run's slice, base-token fees join the escrow (L127).
+ * A claim recovered from a landed `pendingTx` records its signature with zero amounts.
+ */
+export const compound: SettlementStep = async (ctx, settlement) => {
+  if (hasCompleted(settlement, 'done') || settlement.liquidity.claimTxSignature) return;
+  const model = await loadModel(settlement);
+  const position = keeperPosition(model);
+  if (model.token.status !== 'graduated' || !position) {
+    if (settlement.pendingTx) throw new Error(`pendingTx belongs to ${settlement.pendingTx.step}`);
+    return;
+  }
+  const mint = tokenMint(model);
+  const owner = ctx.keeper.publicKey;
+  const solBefore = await ctx.chain.solBalance(owner);
+  const tokensBefore = await ctx.chain.tokenBalance(owner, mint);
+  const { signature, result } = await sendWithPendingTx(ctx, settlement, 'compound', (opts) =>
+    ctx.chain.claimPositionFee(ctx.keeper, mint, position, opts),
+  );
+  let lamports = 0n;
+  let tokens = 0n;
+  if (result) {
+    lamports = gain(solBefore, await ctx.chain.solBalance(owner));
+    tokens = gain(tokensBefore, await ctx.chain.tokenBalance(owner, mint));
+  } else {
+    ctx.logger.warn(
+      { settlement: settlement._id.toHexString(), signature },
+      'fee claim recovered from pendingTx; claimed amounts unknown',
+    );
+  }
+
+  await withTransaction(async (session) => {
+    await Models.updateOne(
+      { _id: model._id },
+      {
+        $inc: {
+          'token.pendingCompoundLamports': lamports,
+          'token.escrowBaseUnits': tokens,
+        },
+      },
+      { session },
+    );
+    settlement.liquidity.claimTxSignature = signature;
+    settlement.pendingTx = null;
+    await settlement.save({ session });
+  });
+  ctx.logger.info(
+    {
+      settlement: settlement._id.toHexString(),
+      signature,
+      lamports: lamports.toString(),
+      tokens: tokens.toString(),
+    },
+    'position fees claimed',
+  );
+};
+
+/**
+ * L375: a `done` settlement has a provider signature or a carry-over (nothing paid), and
+ * liquidity signatures or phase `none`. Liquidity that spent no lamports needs no
+ * signature (a full curve, or nothing to pair). Returns the violation, or `null`.
+ */
+export function doneInvariantViolation(settlement: SettlementDoc): string | null {
+  const { provider, liquidity } = settlement;
+  if (provider.amountMicroUsdc > 0n && !provider.txSignature) {
+    return 'provider amount paid without a signature';
+  }
+  if (liquidity.phase === 'none') return null;
+  const spent = (liquidity.solAddedLamports ?? 0n) > 0n;
+  if (liquidity.phase === 'curve' && spent && !liquidity.buyTxSignature) {
+    return 'curve buy without a signature';
+  }
+  if (
+    liquidity.phase === 'graduated' &&
+    spent &&
+    !(liquidity.addTxSignature && liquidity.lockTxSignature)
+  ) {
+    return 'liquidity added without add and lock signatures';
+  }
+  return null;
+}
+
+/** Step 7: check the L375 invariant and mark the settlement `done`. */
+export const finalize: SettlementStep = async (_ctx, settlement) => {
+  if (hasCompleted(settlement, 'done')) return;
+  const violation = doneInvariantViolation(settlement);
+  if (violation) throw new SettlementInvariantError(violation);
+  await withTransaction(async (session) => {
+    settlement.pendingTx = null;
+    settlement.error = null;
+    completeState(settlement, 'done');
+    await settlement.save({ session });
+  });
+};
+
 /** Steps 2–3: everything up to the provider payout. */
 export const PROVIDER_STEPS: readonly NamedStep[] = [
   { name: 'tagAndSum', run: tagAndSum },
@@ -691,8 +815,18 @@ export const LIQUIDITY_STEPS: readonly NamedStep[] = [
   { name: 'buyAndLock', run: buyAndLock },
 ];
 
-/** Steps 2–5 in order; P6-T5 appends `compound` and `finalize`. */
-export const SETTLEMENT_STEPS: readonly NamedStep[] = [...PROVIDER_STEPS, ...LIQUIDITY_STEPS];
+/** Steps 6–7: fee claim and finalize. */
+export const FINAL_STEPS: readonly NamedStep[] = [
+  { name: 'compound', run: compound },
+  { name: 'finalize', run: finalize },
+];
+
+/** Steps 2–7 in order. */
+export const SETTLEMENT_STEPS: readonly NamedStep[] = [
+  ...PROVIDER_STEPS,
+  ...LIQUIDITY_STEPS,
+  ...FINAL_STEPS,
+];
 
 /** Runs `steps` in order until the settlement is `done`; no retries (the engine adds them). */
 export async function runSteps(

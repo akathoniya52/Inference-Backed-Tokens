@@ -1,4 +1,13 @@
 {
   "files": [],
-  "references": []
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/shared/tsconfig.test.json" },
+    { "path": "packages/chain" },
+    { "path": "packages/chain/tsconfig.test.json" },
+    { "path": "packages/db" },
+    { "path": "packages/db/tsconfig.test.json" },
+    { "path": "apps/mock-upstream" },
+    { "path": "apps/mock-upstream/tsconfig.test.json" }
+  ]
 }

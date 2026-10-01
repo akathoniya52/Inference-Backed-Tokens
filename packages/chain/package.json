@@ -24,6 +24,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@ibt/shared": "workspace:*"
+    "@ibt/shared": "workspace:*",
+    "@meteora-ag/cp-amm-sdk": "1.5.1",
+    "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.99.0",
+    "bs58": "^6.0.0"
   }
 }

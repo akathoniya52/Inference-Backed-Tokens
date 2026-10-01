@@ -15,3 +15,4 @@ allowBuilds:
   mongodb-memory-server: true
   bufferutil: true
   utf-8-validate: true
+  bigint-buffer: set this to true or false

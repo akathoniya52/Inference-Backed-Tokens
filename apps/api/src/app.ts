@@ -8,6 +8,7 @@ import helmet from 'helmet';
 import type { Logger } from 'pino';
 import { pinoHttp } from 'pino-http';
 
+import { createApiAlerts, type ApiAlerts } from './alerts.js';
 import { getAuthUser, getRequestId, type Clock } from './context.js';
 import type { ApiEnv } from './env.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
@@ -46,6 +47,8 @@ export interface AppContext {
   clock: Clock;
   timeouts: AppTimeouts;
   logger: Logger;
+  /** Rolling 5xx / rejected-deposit / paused-model alerts (P5-T5). */
+  alerts: ApiAlerts;
 }
 
 async function mongoReady(): Promise<boolean> {
@@ -72,13 +75,15 @@ async function chainReady(chain: ChainClient): Promise<boolean> {
 export function createApp(deps: AppDeps): Express {
   const { env, chain } = deps;
   const logger = deps.logger ?? createLogger({ level: env.LOG_LEVEL, name: 'api' });
+  const clock = deps.clock ?? (() => new Date());
   const ctx: AppContext = {
     env,
     chain,
     alerter: deps.alerter,
-    clock: deps.clock ?? (() => new Date()),
+    clock,
     timeouts: deps.timeouts ?? {},
     logger,
+    alerts: createApiAlerts({ alerter: deps.alerter, clock, logger }),
   };
 
   const app = express();
@@ -86,6 +91,7 @@ export function createApp(deps: AppDeps): Express {
   app.set('trust proxy', env.TRUST_PROXY);
 
   app.use(requestId());
+  app.use(ctx.alerts.middleware());
   app.use(
     pinoHttp({
       logger,

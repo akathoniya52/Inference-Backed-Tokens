@@ -74,6 +74,7 @@ async function recordRejection(
     if (!isDuplicateKey(err)) throw err;
   });
   ctx.logger.warn({ userId: userId.toHexString(), txSignature, reason }, 'deposit rejected');
+  ctx.alerts.recordRejectedDeposit();
 }
 
 /** Verifies a finalized USDC transfer to the treasury and credits it exactly once (L519). */

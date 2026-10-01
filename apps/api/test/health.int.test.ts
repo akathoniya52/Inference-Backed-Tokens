@@ -7,6 +7,7 @@ import { pino } from 'pino';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import { createApiAlerts } from '../src/alerts.js';
 import { runHealthCheck } from '../src/modules/models/health.js';
 import { bearer, errorOf, makeTestApp, newWallet, signIn, type TestApp } from './helpers.js';
 
@@ -187,6 +188,11 @@ describe('model health check', () => {
       clock: () => t.clock.now(),
       timeouts: { firstByteMs: 100, totalMs: 200 },
       logger: pino({ level: 'silent' }),
+      alerts: createApiAlerts({
+        alerter: t.alerter,
+        clock: () => t.clock.now(),
+        logger: pino({ level: 'silent' }),
+      }),
     };
     const result = await runHealthCheck(ctx, model);
     expect(result).toMatchObject({ ok: false, consecutiveFailures: 1 });

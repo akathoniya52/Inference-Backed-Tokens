@@ -116,9 +116,10 @@ export async function runHealthCheck(
     );
     if (paused.modifiedCount === 1) {
       status = 'paused';
-      await ctx.alerter.alert('error', 'model paused after failed health checks', {
+      ctx.alerts.modelPaused({
         modelId,
         slug: model.slug,
+        reason: 'health_check',
         consecutiveFailures,
         error: result.error,
       });

@@ -57,7 +57,10 @@ export async function pauseModel(ctx: AppContext, id: string): Promise<PauseResu
     { $set: { status: 'paused' } },
   );
   const changed = updated.modifiedCount === 1;
-  if (changed) ctx.logger.info({ modelId: id }, 'admin: model paused');
+  if (changed) {
+    ctx.logger.info({ modelId: id }, 'admin: model paused');
+    ctx.alerts.modelPaused({ modelId: id, slug: row.slug, reason: 'admin' });
+  }
   return {
     response: ModelPauseResponseSchema.parse({ id, status: 'paused' }),
     changed,

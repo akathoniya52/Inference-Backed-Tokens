@@ -206,5 +206,8 @@ export async function updateModel(
     { new: true },
   ).lean<ModelRow>();
   if (!updated) throw new AppError('model_not_found');
+  if (row.status === 'active' && updated.status === 'paused') {
+    ctx.alerts.modelPaused({ modelId: id, slug: updated.slug, reason: 'owner' });
+  }
   return toOwnerDto(updated, await walletOf(updated));
 }

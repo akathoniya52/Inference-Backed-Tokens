@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design tokens: RGB channels consumed by tailwind.config.ts. One accent (amber). */
+@layer base {
+  :root {
+    --ink-950: 11 12 14;
+    --ink-900: 19 21 24;
+    --ink-800: 36 39 44;
+    --ink-600: 78 84 93;
+    --ink-400: 139 145 154;
+    --ink-200: 203 207 212;
+    --ink-50: 240 238 233;
+    --accent: 242 169 59;
+    --accent-strong: 255 190 92;
+    --accent-fg: 26 17 4;
+    --positive: 94 196 140;
+    --negative: 231 104 96;
+    color-scheme: dark;
+  }
+
+  html {
+    @apply bg-ink-950 font-sans text-ink-50 antialiased;
+  }
+
+  body {
+    @apply min-h-screen;
+  }
+
+  :focus-visible {
+    @apply outline outline-2 outline-offset-2 outline-accent;
+  }
+
+  ::selection {
+    @apply bg-accent text-accent-fg;
+  }
+}
+
+@layer components {
+  .nav-link {
+    @apply flex h-16 shrink-0 items-center border-b-2 border-transparent px-3 font-mono text-xs uppercase tracking-label text-ink-400 transition-colors hover:text-ink-50;
+  }
+
+  .nav-link-active {
+    @apply border-accent text-ink-50;
+  }
+
+  .page-title {
+    @apply text-3xl font-semibold tracking-tight text-ink-50 sm:text-4xl;
+  }
+
+  .page-lede {
+    @apply mt-3 max-w-prose text-base text-ink-400;
+  }
+}
+
+/*
+ * Wallet adapter UI overrides. Kept outside @layer so Tailwind does not purge
+ * them (the class names only appear inside the library) and so they follow
+ * @solana/wallet-adapter-react-ui/styles.css with equal specificity.
+ */
+.wallet-adapter-button {
+  @apply h-9 rounded-sm px-4 font-mono text-xs font-medium uppercase tracking-label;
+  line-height: theme('spacing.9');
+}
+
+.wallet-adapter-button-trigger {
+  @apply bg-accent text-accent-fg;
+}
+
+.wallet-adapter-button:not([disabled]):hover {
+  @apply bg-accent-strong;
+}
+
+.wallet-adapter-button:not([disabled]):focus-visible {
+  outline-color: rgb(var(--accent));
+}
+
+.wallet-adapter-button-start-icon,
+.wallet-adapter-button-start-icon img {
+  @apply h-4 w-4;
+}
+
+.wallet-adapter-button-start-icon {
+  @apply mr-2;
+}
+
+.wallet-adapter-dropdown-list {
+  @apply rounded-sm border border-ink-800 bg-ink-900 font-mono text-xs;
+}
+
+.wallet-adapter-modal-wrapper {
+  @apply rounded-sm border border-ink-800 bg-ink-900 font-sans;
+}

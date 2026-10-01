@@ -13,7 +13,7 @@ import { useCallback, useRef, useState } from 'react';
 import { isApiError } from '../lib/api';
 
 export type SendTxStatus =
-  'idle' | 'building' | 'signing' | 'sending' | 'confirming' | 'confirmed' | 'error';
+  'idle' | 'building' | 'signing' | 'sending' | 'confirming' | 'confirmed' | 'failed';
 
 export type SendTxErrorCode =
   'wallet_rejected' | 'slippage' | 'blockhash_expired' | 'insufficient_sol' | 'unknown';
@@ -203,7 +203,7 @@ export function useSendTx(): UseSendTx {
       } catch (cause) {
         const mapped = mapSendTxError(cause);
         setError(mapped);
-        setStatus('error');
+        setStatus('failed');
         return { ok: false, signature: sent, error: mapped };
       } finally {
         busy.current = false;

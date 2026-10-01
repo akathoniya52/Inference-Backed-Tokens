@@ -152,7 +152,7 @@ describe('useSendTx', () => {
     });
     expect(outcome).toMatchObject({ ok: false, error: { code: 'wallet_rejected' } });
     expect(connection.sendRawTransaction).not.toHaveBeenCalled();
-    expect(result.current.status).toBe('error');
+    expect(result.current.status).toBe('failed');
     expect(result.current.error?.message).toMatch(/rejected/);
   });
 

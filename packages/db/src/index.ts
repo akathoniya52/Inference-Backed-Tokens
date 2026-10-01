@@ -10,3 +10,4 @@ export * from './models/index.js';
 export const connection = mongoose.connection;
 export const startSession: typeof mongoose.startSession = (...args) =>
   mongoose.startSession(...args);
+export * from './ledger.js';

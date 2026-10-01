@@ -15,7 +15,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "dev": "pnpm -r --parallel --filter \"./apps/*\" dev",
-    "smoke:local": "pnpm --filter ./scripts exec tsx --conditions=development smoke-local.ts"
+    "smoke:local": "pnpm --filter ./scripts exec tsx --conditions=development smoke-local.ts",
+    "load": "pnpm --filter ./scripts exec tsx --conditions=development load/gateway-load.ts"
   },
   "devDependencies": {
     "@eslint/js": "~9.39.5",

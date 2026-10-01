@@ -2,7 +2,11 @@ import { PublicKey } from '@solana/web3.js';
 import { describe, expect, it } from 'vitest';
 
 import { parseDeposit, type DepositExpectation } from '../src/deposit.js';
-import { loadDepositFixture, type RawDepositTx, type RawInstruction } from './fixtures/load.js';
+import {
+  loadDepositFixture,
+  type RawDepositTx,
+  type RawInstruction,
+} from '../src/testing/fixtures.js';
 
 const SENDER_WALLET = '8eLrykPHS4psd74CWCTHM6ohRu8Um9ESQZyjcfktMcQb';
 const TREASURY_ATA = 'H5DxSmP8dcxbWdXT95KUtBFbprmvu8zUjFLnmi7MjDpc';

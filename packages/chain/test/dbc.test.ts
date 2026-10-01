@@ -28,7 +28,7 @@ import {
   verifyLaunch,
 } from '../src/dbc.js';
 import { DAMM_V2_CONFIG_100_BPS, deriveDbcPoolAddress, NATIVE_MINT } from '../src/sdk.js';
-import { loadAccountFixture } from './fixtures/load.js';
+import { loadAccountFixture } from '../src/testing/fixtures.js';
 
 const pool = loadAccountFixture('dbc-pool') as VirtualPool;
 const config = loadAccountFixture('dbc-config') as PoolConfig;

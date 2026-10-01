@@ -34,6 +34,7 @@
  * is keyless at 0.5 RPS; with it, send header `x-api-key: <key>` (Free tier
  * 1 RPS). An unknown key returns 401. The hourly keeper fits the keyless tier.
  */
+import * as shared from '@ibt/shared';
 import { NATIVE_MINT } from '@solana/spl-token';
 import { PublicKey } from '@solana/web3.js';
 import {
@@ -92,17 +93,16 @@ export {
 export type { PoolState as DammPoolState } from '@meteora-ag/cp-amm-sdk';
 export { NATIVE_MINT };
 
-// TODO(P2-T8): move the address constants below to @ibt/shared.
+// Address constants live in @ibt/shared as base58 strings; re-exported here as `PublicKey`s.
+export type { Cluster } from '@ibt/shared';
 
-export type Cluster = 'devnet' | 'mainnet-beta';
-
-export const DBC_PROGRAM_ID = new PublicKey('dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN');
-export const DBC_POOL_AUTHORITY = new PublicKey('FhVo3mqL8PW5pH5U2CN4XE33DokiyZnUwuGpH2hmHLuM');
-export const WSOL_MINT = new PublicKey('So11111111111111111111111111111111111111112');
+export const DBC_PROGRAM_ID = new PublicKey(shared.DBC_PROGRAM_ID);
+export const DBC_POOL_AUTHORITY = new PublicKey(shared.DBC_POOL_AUTHORITY);
+export const WSOL_MINT = new PublicKey(shared.WSOL_MINT);
 export const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
-export const USDC_MINT: Readonly<Record<Cluster, PublicKey>> = {
-  devnet: new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'),
-  'mainnet-beta': new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),
+export const USDC_MINT: Readonly<Record<shared.Cluster, PublicKey>> = {
+  devnet: new PublicKey(shared.USDC_MINT.devnet),
+  'mainnet-beta': new PublicKey(shared.USDC_MINT['mainnet-beta']),
 };
 
 const dammV2Config100Bps = DAMM_V2_MIGRATION_FEE_ADDRESS[MigrationFeeOption.FixedBps100];

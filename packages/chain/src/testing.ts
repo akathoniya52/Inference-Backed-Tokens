@@ -1,5 +1,5 @@
-/**
- * Test-only helpers (`@ibt/chain/testing`). The fake chain client and fixtures
- * land here in P2-T8.
- */
 export const TESTING_ENTRY = '@ibt/chain/testing';
+
+export * from './testing/fake-chain.js';
+export * from './testing/fake-connection.js';
+export * from './testing/fixtures.js';

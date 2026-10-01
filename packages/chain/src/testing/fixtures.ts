@@ -65,7 +65,7 @@ export function loadDepositFixture(
   name: FixtureName,
   edit?: (raw: RawDepositTx) => void,
 ): ParsedTransactionWithMeta {
-  const text = readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8');
+  const text = readFileSync(new URL(`../../test/fixtures/${name}.json`, import.meta.url), 'utf8');
   const raw = JSON.parse(text) as RawDepositTx;
   edit?.(raw);
   return JSON.parse(JSON.stringify(raw), revive) as ParsedTransactionWithMeta;
@@ -77,7 +77,7 @@ const BASE58_KEY = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 /** Loads a JSON account fixture, reviving base58 address strings into `PublicKey`s. */
 export function loadAccountFixture(name: JsonFixtureName): unknown {
-  const text = readFileSync(new URL(`./${name}.json`, import.meta.url), 'utf8');
+  const text = readFileSync(new URL(`../../test/fixtures/${name}.json`, import.meta.url), 'utf8');
   return JSON.parse(text, (_key, value: unknown) =>
     typeof value === 'string' && BASE58_KEY.test(value) ? new PublicKey(value) : value,
   );

@@ -871,3 +871,13 @@ pnpm smoke:local    # automates all of the above → "SMOKE OK"
 ## 12. Review log
 
 Oracle review 1 (2026-10-01): APPROVE WITH FIXES. All items applied; see review-oracle-1.md.
+
+## 13. Execution log (deviations discovered while building)
+
+- **pnpm 12.6.0** no longer reads `onlyBuiltDependencies`; it hard-fails installs with `ERR_PNPM_IGNORED_BUILDS` and expects `allowBuilds: { esbuild: true, ... }` in `pnpm-workspace.yaml`. P0-T1's `grep onlyBuiltDependencies` accept is obsolete; `allowBuilds` is the key. `overrides` also gained `vite: ~5.4.21` so vitest 3.2 resolves the same Vite 5 as `apps/web`.
+- **TypeScript layout (G10):** every package has a composite `tsconfig.json` (src only, emits `dist`) plus a non-composite `noEmit` `tsconfig.test.json` (src + test + vitest config). Root `tsconfig.json` references both, so `pnpm typecheck` (`tsc -b`) type-checks tests too. `tsBuildInfoFile` lives in `dist/` so `rm -rf dist` is a true fresh-clone simulation (TS 5.6+ otherwise leaves `*.tsbuildinfo` beside the tsconfig and skips emit). Web and scripts put theirs in `node_modules/.cache/`.
+- **G10 confirmed:** `injectWorkspacePackages: true` still symlinks workspace packages (pnpm dedupes injected deps), and vitest's `development` condition resolves `@ibt/shared` to `packages/shared/src/index.ts` (asserted by `packages/chain/test/smoke.test.ts` via `SHARED_SOURCE_URL`). `@ibt/shared` compiles with `types: []`, so it declares `ImportMeta.url` itself in `src/import-meta.d.ts`.
+- **mongodb-memory-server** reads `config.mongodbMemoryServer.version = 7.0.14` from the root `package.json` and downloads to `node_modules/.cache/mongodb-memory-server` (not `~/.cache/mongodb-binaries`); CI caches that path. `test/setup.ts` in `@ibt/db` also pins the version and `provide()`s `mongoUri`.
+- **Git:** the operator's global config signs commits with a passphrase-protected SSH key that is not in the agent. `commit.gpgsign=false` and `tag.gpgsign=false` are set in this repo's local config only (`git config --local`), so agent commits are unsigned. Re-sign later with `git rebase --exec 'git commit --amend --no-edit -S'` if desired.
+- **Wave discipline:** dependencies for a wave are installed by the orchestrator in one commit before agents start; agents never run `pnpm add`/`install` and stage only their own package path, so parallel agents never collide on the lockfile.
+- P0-T4 accept: `kill %1` only works in an interactive shell; non-interactive runners must use `kill $!` (or `lsof -ti :4000 | xargs kill`).

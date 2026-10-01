@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "create-config": "tsx --conditions=development create-config.ts"
+    "create-config": "tsx --conditions=development create-config.ts",
+    "refill-float": "tsx --conditions=development refill-float.ts"
   },
   "dependencies": {
     "@ibt/chain": "workspace:*",

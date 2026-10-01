@@ -1,0 +1,26 @@
+# Local infra only. The API and keeper run on the host via `pnpm dev`.
+services:
+  mongo:
+    image: mongo:7
+    command: ['mongod', '--replSet', 'rs0', '--bind_ip_all']
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # Initiates the single-node replica set once (transactions need one).
+      # The member is named localhost:27017 on purpose: a member named by the
+      # container hostname is unreachable from the host.
+      test:
+        - CMD-SHELL
+        - >-
+          mongosh --quiet --eval
+          "try { rs.status().ok } catch (e) { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'localhost:27017' }] }).ok }"
+          | grep -q 1
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  mongo-data:

@@ -19,7 +19,7 @@ import { encrypt, generateDepositRef } from '@ibt/shared/node';
 import { DEFAULT_MOCK_API_KEY } from '@ibt/mock-upstream';
 import { Keypair, PublicKey } from '@solana/web3.js';
 
-import { CliError, EXIT_OK, EXIT_REFUSED, runMain } from './lib/cli.js';
+import { CliError, EXIT_OK, EXIT_REFUSED, isMain, runMain } from './lib/cli.js';
 
 const USAGE =
   'usage: seed-models.ts [--owner <wallet>] [--dev-credit <wallet> <usdc>] [--fake-token]\n' +
@@ -50,6 +50,15 @@ const SEED_MODELS: readonly SeedModel[] = [
   },
 ];
 const FAKE_TOKEN_SLUG = 'mock-llm';
+
+export interface SeedOptions {
+  /** Model owner wallet; defaults to `TREASURY_WALLET`, else a throwaway key. */
+  owner?: string | undefined;
+  devCredit?: { wallet: string; usdc: string } | null;
+  fakeToken?: boolean;
+  /** Source of `MONGODB_URI`, `MASTER_KEY`, `CLUSTER`, ...; defaults to `process.env`. */
+  env?: NodeJS.ProcessEnv;
+}
 
 interface Flags {
   owner: string | undefined;
@@ -97,8 +106,8 @@ function mongoHost(uri: string): string | null {
 }
 
 /** G23: runs before any connection or write. */
-function assertLocalOnly(flag: string, uri: string): void {
-  if (process.env.CLUSTER?.trim() === 'mainnet-beta') {
+function assertLocalOnly(flag: string, uri: string, env: NodeJS.ProcessEnv): void {
+  if (env.CLUSTER?.trim() === 'mainnet-beta') {
     throw new CliError(
       `refusing ${flag}: CLUSTER is mainnet-beta; nothing was written`,
       EXIT_REFUSED,
@@ -114,8 +123,8 @@ function assertLocalOnly(flag: string, uri: string): void {
   }
 }
 
-function requireEnv(name: string): string {
-  const value = process.env[name]?.trim();
+function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
+  const value = env[name]?.trim();
   if (!value) throw new CliError(`${name} is not set (load it with tsx --env-file=apps/api/.env)`);
   return value;
 }
@@ -138,8 +147,8 @@ function parseUsdc(value: string): bigint {
   return micro;
 }
 
-function optionalPublicKey(name: string): PublicKey | null {
-  const raw = process.env[name]?.trim();
+function optionalPublicKey(env: NodeJS.ProcessEnv, name: string): PublicKey | null {
+  const raw = env[name]?.trim();
   if (!raw) return null;
   try {
     return new PublicKey(raw);
@@ -158,13 +167,13 @@ async function upsertUser(wallet: string): Promise<Types.ObjectId> {
   return user._id;
 }
 
-function upstreamBaseUrl(): string {
-  const port = process.env.MOCK_UPSTREAM_PORT?.trim() || '4010';
+function upstreamBaseUrl(env: NodeJS.ProcessEnv): string {
+  const port = env.MOCK_UPSTREAM_PORT?.trim() || '4010';
   return `http://localhost:${port}/v1`;
 }
 
-async function seedModels(ownerId: Types.ObjectId, masterKey: string) {
-  const baseUrl = upstreamBaseUrl();
+async function upsertModels(ownerId: Types.ObjectId, masterKey: string, env: NodeJS.ProcessEnv) {
+  const baseUrl = upstreamBaseUrl(env);
   const seeded = [];
   for (const seed of SEED_MODELS) {
     const existed = (await Models.exists({ slug: seed.slug })) !== null;
@@ -199,7 +208,7 @@ async function seedModels(ownerId: Types.ObjectId, masterKey: string) {
   return seeded;
 }
 
-async function seedFakeToken(owner: string) {
+async function seedFakeToken(owner: string, env: NodeJS.ProcessEnv) {
   const db = connection.db;
   if (!db) throw new Error('connectDb must run first');
   const model = await Models.findOne({ slug: FAKE_TOKEN_SLUG }).lean();
@@ -207,7 +216,7 @@ async function seedFakeToken(owner: string) {
 
   const mint = model.token.mint ? new PublicKey(model.token.mint) : Keypair.generate().publicKey;
   // A real DBC_CONFIG keeps the fake pool consistent with launch verification; any key works.
-  const config = optionalPublicKey('DBC_CONFIG') ?? PublicKey.default;
+  const config = optionalPublicKey(env, 'DBC_CONFIG') ?? PublicKey.default;
   const mongo = { collection: (name: string) => db.collection<FakeChainTx>(name) };
   const chain = createFakeChain({ mongo });
   const dbcPool = await chain.addPersistedPool({ mint, config, creator: new PublicKey(owner) });
@@ -244,13 +253,19 @@ async function devCredit(wallet: string, micro: bigint) {
   };
 }
 
-runMain(async () => {
-  const flags = parseFlags();
-  const uri = requireEnv('MONGODB_URI');
-  if (flags.devCredit) assertLocalOnly('--dev-credit', uri);
-  if (flags.fakeToken) assertLocalOnly('--fake-token', uri);
+/** The seed-models CLI as a function: same guards (G23), writes and result as the printed JSON. */
+export async function seedModels(options: SeedOptions = {}) {
+  const env = options.env ?? process.env;
+  const flags: Flags = {
+    owner: options.owner,
+    devCredit: options.devCredit ?? null,
+    fakeToken: options.fakeToken ?? false,
+  };
+  const uri = requireEnv(env, 'MONGODB_URI');
+  if (flags.devCredit) assertLocalOnly('--dev-credit', uri, env);
+  if (flags.fakeToken) assertLocalOnly('--fake-token', uri, env);
 
-  const masterKey = requireEnv('MASTER_KEY');
+  const masterKey = requireEnv(env, 'MASTER_KEY');
   const credit = flags.devCredit && {
     wallet: parseWallet('--dev-credit <wallet>', flags.devCredit.wallet),
     micro: parseUsdc(flags.devCredit.usdc),
@@ -258,18 +273,24 @@ runMain(async () => {
   const owner =
     flags.owner !== undefined
       ? parseWallet('--owner', flags.owner)
-      : (optionalPublicKey('TREASURY_WALLET') ?? Keypair.generate().publicKey).toBase58();
+      : (optionalPublicKey(env, 'TREASURY_WALLET') ?? Keypair.generate().publicKey).toBase58();
 
   await connectDb(uri);
   try {
     await syncAllIndexes();
     const ownerId = await upsertUser(owner);
-    const models = await seedModels(ownerId, masterKey);
-    const fakeToken = flags.fakeToken ? await seedFakeToken(owner) : null;
+    const models = await upsertModels(ownerId, masterKey, env);
+    const fakeToken = flags.fakeToken ? await seedFakeToken(owner, env) : null;
     const credited = credit ? await devCredit(credit.wallet, credit.micro) : null;
-    console.log(JSON.stringify({ owner, models, fakeToken, devCredit: credited }, null, 2));
-    return EXIT_OK;
+    return { owner, models, fakeToken, devCredit: credited };
   } finally {
     await disconnectDb();
   }
-});
+}
+
+if (isMain(import.meta.url)) {
+  runMain(async () => {
+    console.log(JSON.stringify(await seedModels(parseFlags()), null, 2));
+    return EXIT_OK;
+  });
+}

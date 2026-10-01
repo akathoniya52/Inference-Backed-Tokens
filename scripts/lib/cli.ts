@@ -1,5 +1,8 @@
 // Shared CLI plumbing for the operator scripts: argument parsing, the human and
 // mainnet gates (P8-T1), secret-key loading and RPC cluster checks.
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 
 import { CLUSTERS, type Cluster } from '@ibt/shared';
@@ -20,6 +23,18 @@ export class CliError extends Error {
   ) {
     super(message);
     this.name = 'CliError';
+  }
+}
+
+/** True when the module at `moduleUrl` is the script node/tsx was started with (not imported). */
+export function isMain(moduleUrl: string): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(resolve(entry)) === realpathSync(fileURLToPath(moduleUrl));
+  } catch (_err) {
+    // A missing entry path (e.g. `node -e`) can never be this module.
+    return false;
   }
 }
 

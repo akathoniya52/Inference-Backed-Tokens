@@ -6,7 +6,7 @@ import bs58 from 'bs58';
 import nacl from 'tweetnacl';
 import type { z } from 'zod';
 
-import { CliError, EXIT_OK, parseCli, runMain } from './lib/cli.js';
+import { CliError, EXIT_OK, isMain, parseCli, runMain } from './lib/cli.js';
 
 const USAGE =
   'usage: dev-signin.ts [--export]\n' +
@@ -39,9 +39,10 @@ async function postJson<S extends z.ZodType>(
   return parsed.data;
 }
 
-runMain(async () => {
-  const flags = parseCli({ export: { type: 'boolean' } }, USAGE);
-  const apiUrl = process.env.API_URL?.trim() || DEFAULT_API_URL;
+/** Signs in with a fresh in-memory keypair; returns the wallet and its JWT. */
+export async function signInEphemeral({
+  apiUrl = DEFAULT_API_URL,
+}: { apiUrl?: string } = {}): Promise<{ wallet: string; jwt: string }> {
   const keypair = Keypair.generate();
   const wallet = keypair.publicKey.toBase58();
 
@@ -59,11 +60,20 @@ runMain(async () => {
     { wallet, nonce, signature: bs58.encode(signature) },
     VerifyResponseSchema,
   );
+  return { wallet, jwt: token };
+}
 
-  console.log(
-    flags.export
-      ? `export WALLET=${wallet} JWT=${token}`
-      : JSON.stringify({ wallet, jwt: token }, null, 2),
-  );
-  return EXIT_OK;
-});
+if (isMain(import.meta.url)) {
+  runMain(async () => {
+    const flags = parseCli({ export: { type: 'boolean' } }, USAGE);
+    const { wallet, jwt } = await signInEphemeral({
+      apiUrl: process.env.API_URL?.trim() || DEFAULT_API_URL,
+    });
+    console.log(
+      flags.export
+        ? `export WALLET=${wallet} JWT=${jwt}`
+        : JSON.stringify({ wallet, jwt }, null, 2),
+    );
+    return EXIT_OK;
+  });
+}

@@ -7,6 +7,7 @@ import { CurveProgress } from '../components/CurveProgress';
 import { formatMTokPrice, PhaseBadge } from '../components/ModelCard';
 import { AddressLink, EXTERNAL_LINK, ModelStats } from '../components/ModelStats';
 import { SettlementTable } from '../components/SettlementTable';
+import { TradePanel } from '../components/TradePanel';
 import { isApiError } from '../lib/api';
 import { shortAddress } from '../lib/format';
 import { useModel, useTokenState } from '../lib/queries';
@@ -25,6 +26,8 @@ interface TokenPageProps {
   /** Mount point for the P7-T8 ClaimFees (owner only). */
   claimFees?: Slot;
 }
+
+const defaultTradePanel: Slot = ({ model }) => <TradePanel model={model} />;
 
 const SECTION_LABEL = 'font-mono text-xs uppercase tracking-label text-ink-400';
 const PANEL = 'rounded-sm border border-ink-800 bg-ink-900/60 p-6';
@@ -104,7 +107,7 @@ function PhasePanel({ model }: { model: Model }) {
   );
 }
 
-export function TokenPage({ tradePanel, claimFees }: TokenPageProps = {}) {
+export function TokenPage({ tradePanel = defaultTradePanel, claimFees }: TokenPageProps = {}) {
   const { slug = '' } = useParams<{ slug: string }>();
   const model = useModel(slug);
   const token = model.data?.token;

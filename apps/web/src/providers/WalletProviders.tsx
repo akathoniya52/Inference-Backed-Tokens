@@ -8,6 +8,7 @@ import { useMemo, type ReactNode } from 'react';
 import '@solana/wallet-adapter-react-ui/styles.css';
 
 import { env } from '../env';
+import { useSessionWalletSync } from '../hooks/useAuth';
 
 const NETWORK =
   env.VITE_CLUSTER === 'devnet' ? WalletAdapterNetwork.Devnet : WalletAdapterNetwork.Mainnet;
@@ -16,6 +17,11 @@ const NETWORK =
  * Phantom and Solflare are registered explicitly; Wallet Standard wallets
  * (Backpack and others) are detected by `WalletProvider` on its own.
  */
+function SessionWalletSync() {
+  useSessionWalletSync();
+  return null;
+}
+
 export function WalletProviders({ children }: { children: ReactNode }) {
   const wallets = useMemo(
     () => [new PhantomWalletAdapter(), new SolflareWalletAdapter({ network: NETWORK })],
@@ -25,7 +31,10 @@ export function WalletProviders({ children }: { children: ReactNode }) {
   return (
     <ConnectionProvider endpoint={env.VITE_RPC_URL}>
       <WalletProvider wallets={wallets} autoConnect>
-        <WalletModalProvider>{children}</WalletModalProvider>
+        <WalletModalProvider>
+          <SessionWalletSync />
+          {children}
+        </WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
   );

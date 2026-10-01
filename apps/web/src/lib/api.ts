@@ -1,7 +1,7 @@
 import { ErrorEnvelopeSchema } from '@ibt/shared';
 
 import { env } from '../env';
-import { getToken } from './auth';
+import { clearToken, getToken } from './auth';
 
 export interface ApiErrorInit {
   code: string;
@@ -81,6 +81,8 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
     );
   }
 
+  // An expired or revoked JWT signs the user out so `WalletGate` asks again.
+  if (response.status === 401 && jwt !== null && getToken() === jwt) clearToken();
   if (!response.ok) throw await toApiError(response);
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;

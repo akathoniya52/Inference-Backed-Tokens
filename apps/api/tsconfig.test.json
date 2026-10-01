@@ -9,6 +9,7 @@
   "references": [
     { "path": "../../packages/shared" },
     { "path": "../../packages/db" },
-    { "path": "../../packages/chain" }
+    { "path": "../../packages/chain" },
+    { "path": "../../apps/mock-upstream" }
   ]
 }

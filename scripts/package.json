@@ -10,10 +10,12 @@
   "dependencies": {
     "@ibt/chain": "workspace:*",
     "@ibt/db": "workspace:*",
+    "@ibt/mock-upstream": "workspace:*",
     "@ibt/shared": "workspace:*",
     "@solana/web3.js": "^1.99.0",
     "bs58": "^6.0.0",
     "tsx": "^4.23.0",
+    "tweetnacl": "^1.0.3",
     "zod": "^4.6.5"
   },
   "devDependencies": {

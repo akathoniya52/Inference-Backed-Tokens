@@ -5,10 +5,11 @@
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
     "types": ["node"]
   },
-  "include": ["*.ts", "lib/**/*.ts", "load/**/*.ts"],
+  "include": ["*.ts", "lib/**/*.ts", "load/**/*.ts", "test/**/*.ts"],
   "references": [
     { "path": "../packages/shared" },
     { "path": "../packages/db" },
-    { "path": "../packages/chain" }
+    { "path": "../packages/chain" },
+    { "path": "../apps/mock-upstream" }
   ]
 }

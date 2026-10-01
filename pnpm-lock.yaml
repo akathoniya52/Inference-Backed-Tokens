@@ -243,6 +243,9 @@ importers:
         specifier: ^4.6.5
         version: 4.6.5
     devDependencies:
+      '@ibt/mock-upstream':
+        specifier: workspace:*
+        version: link:../mock-upstream
       '@types/cors':
         specifier: ^2.8.19
         version: 2.8.19
@@ -255,6 +258,9 @@ importers:
       mongodb-memory-server:
         specifier: ^10.4.3
         version: 10.4.3(supports-color@7.2.0)
+      openai:
+        specifier: ^7.25.0
+        version: 7.25.0(undici@7.30.0)(ws@8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6))(zod@4.6.5)
       supertest:
         specifier: ^7.3.0
         version: 7.3.0(supports-color@7.2.0)
@@ -448,6 +454,9 @@ importers:
       '@ibt/db':
         specifier: workspace:*
         version: link:../packages/db
+      '@ibt/mock-upstream':
+        specifier: workspace:*
+        version: link:../apps/mock-upstream
       '@ibt/shared':
         specifier: workspace:*
         version: link:../packages/shared
@@ -460,6 +469,9 @@ importers:
       tsx:
         specifier: ^4.23.0
         version: 4.23.15
+      tweetnacl:
+        specifier: ^1.0.3
+        version: 1.0.3
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -3764,6 +3776,30 @@ packages:
   open@7.4.2:
     resolution: {integrity: sha512-MVHddDVweXZF3awtlAS+6pgKLlm/JgxZ90+/NBurBoQctVOOB/zDdVjcyPzQ+0laDGbsWgrRkflI65sQeOgT9Q==}
     engines: {node: '>=8'}
+
+  openai@7.25.0:
+    resolution: {integrity: sha512-cnk0d4QT58Vq0vl2KG+DCa/C2+cXthsK2rUeaqtprq33mKv9dlX8o7fWSS283wa2IE/aVdsRyX1+Dqwz551olg==}
+    engines: {node: '>=22.0.0'}
+    peerDependencies:
+      '@aws-sdk/credential-provider-node': '>=3.972.0 <4'
+      '@smithy/hash-node': '>=4.3.0 <5'
+      '@smithy/signature-v4': '>=5.4.0 <6'
+      undici: '>=5 <9'
+      ws: ^8.21.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      '@aws-sdk/credential-provider-node':
+        optional: true
+      '@smithy/hash-node':
+        optional: true
+      '@smithy/signature-v4':
+        optional: true
+      undici:
+        optional: true
+      ws:
+        optional: true
+      zod:
+        optional: true
 
   optionator@0.9.4:
     resolution: {integrity: sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==}
@@ -8577,6 +8613,12 @@ snapshots:
     dependencies:
       is-docker: 2.2.1
       is-wsl: 2.2.0
+
+  openai@7.25.0(undici@7.30.0)(ws@8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6))(zod@4.6.5):
+    optionalDependencies:
+      undici: 7.30.0
+      ws: 8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6)
+      zod: 4.6.5
 
   optionator@0.9.4:
     dependencies:

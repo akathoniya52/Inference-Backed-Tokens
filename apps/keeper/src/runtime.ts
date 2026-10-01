@@ -1,5 +1,10 @@
-import { FakePriceSource, JupiterPriceSource, RealChainClient } from '@ibt/chain';
-import { createFakeChain, type FakeChainTx } from '@ibt/chain/testing';
+import { JupiterPriceSource, type PriceSource, RealChainClient } from '@ibt/chain';
+import {
+  createFakeChain,
+  type FakeChainMongo,
+  type FakeChainTx,
+  loadFakeSolUsd,
+} from '@ibt/chain/testing';
 import { connection } from '@ibt/db';
 import { MIN_PAYOUT_MICRO, solToLamports, usdcStringToMicro } from '@ibt/shared';
 import type { Alerter } from '@ibt/shared/node';
@@ -14,6 +19,20 @@ export type ChainMode = 'real' | 'fake';
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 const FAKE_FUNDING = 1_000_000_000_000_000n;
+/** Used when `seed-models --fake-token` has not stored a price in `fakeChainPrices`. */
+export const DEFAULT_FAKE_SOL_USD = 150;
+
+/** Fake SOL price read from `fakeChainPrices` on every call, so a re-seeded price applies. */
+export class SeededFakePriceSource implements PriceSource {
+  constructor(
+    private readonly mongo: FakeChainMongo,
+    private readonly fallback = DEFAULT_FAKE_SOL_USD,
+  ) {}
+
+  async solUsd(): Promise<number> {
+    return (await loadFakeSolUsd(this.mongo)) ?? this.fallback;
+  }
+}
 
 export function mongoHosts(uri: string): string[] {
   const match = /^mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?([^/?]+)/.exec(uri);
@@ -67,11 +86,12 @@ export function buildKeeperCtx(
     assertFakeChainAllowed(env);
     const db = connection.db;
     if (!db) throw new Error('connectDb must run before buildKeeperCtx');
-    const price = new FakePriceSource(150);
+    const mongo: FakeChainMongo = { collection: (name) => db.collection<FakeChainTx>(name) };
+    const price = new SeededFakePriceSource(mongo);
     const chain = createFakeChain({
       priceSource: price,
       usdcMint: new PublicKey(env.USDC_MINT),
-      mongo: { collection: (name) => db.collection<FakeChainTx>(name) },
+      mongo,
     });
     chain.setUsdc(treasury.publicKey, FAKE_FUNDING);
     chain.setSol(keeper.publicKey, FAKE_FUNDING);

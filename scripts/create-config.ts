@@ -15,7 +15,6 @@ import {
 } from '@ibt/chain';
 import { type Cluster, lamportsToSol } from '@ibt/shared';
 import { Connection, Keypair, PublicKey, type Transaction } from '@solana/web3.js';
-import bs58 from 'bs58';
 
 import {
   assertRpcCluster,
@@ -200,9 +199,7 @@ async function send(cluster: Cluster, rpcFlag: string | undefined): Promise<numb
       `treasury (payer, fee claimer, leftover receiver): ${treasury.publicKey.toBase58()}`,
       `config: ${config.publicKey.toBase58()}`,
       '',
-      'WARNING: config keypair secret, printed once and never written to disk.',
-      'Store it in the secret manager now; it is not shown again:',
-      `  ${bs58.encode(config.secretKey)}`,
+      'the config keypair only co-signs this createConfig; its secret is never printed or stored.',
       '',
       ...keyParameters(buildPartnerConfigParams(cluster)),
     ].join('\n'),

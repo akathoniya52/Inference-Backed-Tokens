@@ -1,8 +1,54 @@
 import './version-check.js';
+
+import { hostname } from 'node:os';
+
+import { connectDb, disconnectDb } from '@ibt/db';
+import { createLogAlerter, createLogger } from '@ibt/shared/node';
+
+import { loadEnv } from './env.js';
 import { createHealthServer } from './health-server.js';
+import { createLease } from './lease.js';
+import { buildKeeperCtx } from './runtime.js';
+import { createScheduler } from './scheduler.js';
 
-const port = Number(process.env.KEEPER_PORT ?? 4001);
+async function main(): Promise<void> {
+  const env = loadEnv();
+  const logger = createLogger({ level: env.LOG_LEVEL, name: 'keeper' });
+  await connectDb(env.MONGODB_URI);
+  const ctx = buildKeeperCtx(env, env.CHAIN_MODE, { logger, alerter: createLogAlerter(logger) });
+  logger.info(
+    { cluster: env.CLUSTER, chain: env.CHAIN_MODE, keeper: ctx.keeper.publicKey.toBase58() },
+    'keeper starting',
+  );
 
-createHealthServer().listen(port, () => {
-  process.stdout.write(`keeper health server listening on http://localhost:${port}\n`);
+  const scheduler = createScheduler({ logger });
+  const lease = createLease({
+    holder: `${hostname()}:${process.pid}`,
+    clock: ctx.clock,
+    logger,
+    onAcquired: () => scheduler.start(),
+    onLost: () => scheduler.stop(),
+  });
+
+  const server = createHealthServer().listen(env.KEEPER_PORT, () => {
+    logger.info({ port: env.KEEPER_PORT }, 'keeper health server listening');
+  });
+  await lease.start();
+
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, 'keeper shutting down');
+    scheduler.stop();
+    await lease.stop();
+    server.close();
+    await disconnectDb();
+    process.exit(0);
+  };
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => void shutdown(signal));
+  }
+}
+
+main().catch((err: unknown) => {
+  createLogger({ level: 'error', name: 'keeper' }).fatal({ err }, 'keeper failed to start');
+  process.exit(1);
 });

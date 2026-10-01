@@ -1,9 +1,17 @@
 import { createFakeChain, type FakeChain, type FakeChainTx } from '@ibt/chain/testing';
 import { FakePriceSource } from '@ibt/chain';
-import { connection, connectDb, disconnectDb, syncAllIndexes } from '@ibt/db';
+import {
+  Models,
+  Users,
+  connection,
+  connectDb,
+  disconnectDb,
+  syncAllIndexes,
+  type ModelDoc,
+} from '@ibt/db';
 import { MIN_PAYOUT_MICRO, type IntLike } from '@ibt/shared';
 import { createLogger, type Alerter, type AlertLevel } from '@ibt/shared/node';
-import { Keypair } from '@solana/web3.js';
+import { Keypair, type PublicKey } from '@solana/web3.js';
 import { inject } from 'vitest';
 
 import type { Clock, KeeperConfig, KeeperCtx } from '../src/ctx.js';
@@ -63,6 +71,45 @@ export interface TestKeeperCtx extends KeeperCtx {
 export const USDC = 1_000_000n;
 
 export const micro = (usdc: IntLike): bigint => BigInt(usdc) * USDC;
+
+let seq = 0;
+
+export interface TestModel {
+  model: ModelDoc;
+  providerWallet: PublicKey;
+  mint: PublicKey;
+  pool: PublicKey | null;
+}
+
+/** A provider plus a model; `phase` other than `none` also registers a DBC pool on the fake chain. */
+export async function createTestModel(
+  ctx: TestKeeperCtx,
+  phase: 'none' | 'curve' = 'none',
+): Promise<TestModel> {
+  seq += 1;
+  const providerWallet = Keypair.generate().publicKey;
+  const provider = await Users.create({
+    wallet: providerWallet.toBase58(),
+    role: 'provider',
+    depositRef: `KP${String(seq).padStart(6, '0')}`,
+  });
+  const mint = Keypair.generate().publicKey;
+  const pool =
+    phase === 'curve'
+      ? ctx.chain.addPool({ mint, config: Keypair.generate().publicKey, creator: providerWallet })
+      : null;
+  const model = await Models.create({
+    providerId: provider._id,
+    slug: `model-${seq}`,
+    name: `Model ${seq}`,
+    upstream: { baseUrl: 'http://127.0.0.1:4010', modelName: 'mock', apiKeyEnc: 'enc' },
+    pricing: { inputPerMTokMicroUsdc: 1_000_000n, outputPerMTokMicroUsdc: 2_000_000n },
+    token: pool
+      ? { status: 'curve', mint: mint.toBase58(), dbcPool: pool.toBase58(), symbol: `T${seq}` }
+      : {},
+  });
+  return { model, providerWallet, mint, pool };
+}
 
 /** Connects `@ibt/db` to a fresh database on the shared replica set (one per test file). */
 export async function makeKeeperCtx(

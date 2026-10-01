@@ -7,6 +7,7 @@ import { createLogAlerter, createLogger } from '@ibt/shared/node';
 
 import { loadEnv } from './env.js';
 import { createHealthServer } from './health-server.js';
+import { POOL_POLLER_CRON, createPoolPoller } from './jobs/poolPoller.js';
 import { createLease } from './lease.js';
 import { buildKeeperCtx } from './runtime.js';
 import { createScheduler } from './scheduler.js';
@@ -22,6 +23,8 @@ async function main(): Promise<void> {
   );
 
   const scheduler = createScheduler({ logger });
+  const poolPoller = createPoolPoller(ctx);
+  scheduler.add('poolPoller', POOL_POLLER_CRON, () => poolPoller.tick());
   const lease = createLease({
     holder: `${hostname()}:${process.pid}`,
     clock: ctx.clock,

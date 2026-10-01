@@ -10,10 +10,26 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ibt/chain": "workspace:*",
+    "@ibt/db": "workspace:*",
     "@ibt/shared": "workspace:*",
-    "express": "^5.2.1"
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
+    "jose": "^6.2.12",
+    "pino": "^9.14.0",
+    "pino-http": "^10.5.0",
+    "tiktoken": "^1.0.22",
+    "tweetnacl": "^1.0.3",
+    "undici": "^7.30.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/express": "^5.0.6"
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/supertest": "^7.2.1",
+    "mongodb-memory-server": "^10.4.3",
+    "supertest": "^7.3.0"
   }
 }

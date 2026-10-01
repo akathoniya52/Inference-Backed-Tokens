@@ -78,9 +78,17 @@ export async function lease(
   }
 }
 
+/**
+ * True once the amounts are fixed: the payout step completed, or a payout was signed and
+ * its `pendingTx` is still stored. Re-tagging then could pull in requests that arrived
+ * after the crash and record an amount that differs from the transfer that landed.
+ */
+const amountsFixed = (settlement: SettlementDoc): boolean =>
+  hasCompleted(settlement, 'paid_provider') || settlement.pendingTx != null;
+
 /** Step 2: tag every untagged billable request before `periodEnd`, then sum by `settlementId`. */
 export const tagAndSum: SettlementStep = async (_ctx, settlement) => {
-  if (hasCompleted(settlement, 'paid_provider')) return;
+  if (amountsFixed(settlement)) return;
   await withTransaction(async (session) => {
     await Requests.updateMany(
       {
@@ -109,7 +117,7 @@ export const tagAndSum: SettlementStep = async (_ctx, settlement) => {
 
 /** Step 2b: split revenue by the model's splits and current token phase (G16/G17). */
 export const split: SettlementStep = async (_ctx, settlement) => {
-  if (hasCompleted(settlement, 'paid_provider')) return;
+  if (amountsFixed(settlement)) return;
   const model = await loadModel(settlement);
   const phase = tokenPhase(model.token.status);
   const shares = splitRevenue(settlement.revenueMicroUsdc, model.splits, phase);

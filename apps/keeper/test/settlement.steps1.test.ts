@@ -260,4 +260,34 @@ describe('settlement steps 1–3', () => {
     expect(transfers()).toBe(before);
     expect((await reload(doc)).pendingTx).not.toBeNull();
   });
+
+  it.each(['crashAfterLand', 'crashAfter'] as const)(
+    'resume with a stored pendingTx (%s) skips tagAndSum and split; a later request stays untagged',
+    async (crash) => {
+      const { model, providerWallet } = await createTestModel(ctx, 'curve');
+      await addRequest(model._id, micro(10), P0);
+      const doc = await open(model._id);
+
+      ctx.chain[crash]('transferUsdc');
+      await expect(runSteps(ctx, doc, SETTLEMENT_STEPS)).rejects.toThrow();
+      const crashed = await reload(doc);
+      expect(crashed.pendingTx).not.toBeNull();
+      expect(crashed.revenueMicroUsdc).toBe(micro(10));
+
+      await addRequest(model._id, micro(20), new Date(P0.getTime() + 60_000));
+      await runSteps(ctx, crashed, SETTLEMENT_STEPS);
+
+      const saved = await reload(doc);
+      expect(saved.state).toBe('paid_provider');
+      expect(saved.revenueMicroUsdc).toBe(micro(10));
+      expect(saved.requestCount).toBe(1);
+      expect(saved.provider.amountMicroUsdc).toBe(micro(7));
+      const landed = await ctx.chain.landedTxs({ settlementRef: doc._id.toHexString() });
+      expect(landed).toHaveLength(1);
+      expect(landed[0]?.signature).toBe(saved.provider.txSignature);
+      expect(landed[0]?.amount).toBe(micro(7).toString());
+      expect(await ctx.chain.usdcBalance(providerWallet)).toBe(micro(7));
+      expect(await Requests.countDocuments({ modelId: model._id, settlementId: null })).toBe(1);
+    },
+  );
 });

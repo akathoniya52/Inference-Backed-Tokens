@@ -3,11 +3,16 @@ import './version-check.js';
 import { hostname } from 'node:os';
 
 import { connectDb, disconnectDb } from '@ibt/db';
+import { solToLamports } from '@ibt/shared';
 import { createLogAlerter, createLogger } from '@ibt/shared/node';
 
 import { loadEnv } from './env.js';
 import { createHealthServer } from './health-server.js';
+import { FLOAT_MONITOR_CRON, createFloatMonitor } from './jobs/floatMonitor.js';
+import { HEALTH_CHECK_CRON, createHealthCheckJob } from './jobs/healthCheck.js';
+import { HOLD_EXPIRY_CRON, createHoldExpiryJob } from './jobs/holdExpiry.js';
 import { POOL_POLLER_CRON, createPoolPoller } from './jobs/poolPoller.js';
+import { STATS_CRON, createStatsJob } from './jobs/stats.js';
 import { createLease } from './lease.js';
 import { buildKeeperCtx } from './runtime.js';
 import { createScheduler } from './scheduler.js';
@@ -26,6 +31,31 @@ async function main(): Promise<void> {
   const scheduler = createScheduler({ logger });
   const poolPoller = createPoolPoller(ctx);
   scheduler.add('poolPoller', POOL_POLLER_CRON, () => poolPoller.tick());
+  const floatMonitor = createFloatMonitor(ctx, {
+    floatMinLamports: solToLamports(env.FLOAT_MIN_SOL),
+  });
+  scheduler.add('floatMonitor', FLOAT_MONITOR_CRON, async () => {
+    await floatMonitor.tick();
+  });
+  const holdExpiry = createHoldExpiryJob(ctx);
+  scheduler.add('holdExpiry', HOLD_EXPIRY_CRON, async () => {
+    await holdExpiry.tick();
+  });
+  const stats = createStatsJob(ctx);
+  scheduler.add('stats', STATS_CRON, async () => {
+    await stats.tick();
+  });
+  if (env.ADMIN_TOKEN) {
+    const healthCheck = createHealthCheckJob(ctx, {
+      apiUrl: env.API_INTERNAL_URL,
+      adminToken: env.ADMIN_TOKEN,
+    });
+    scheduler.add('healthCheck', HEALTH_CHECK_CRON, async () => {
+      await healthCheck.tick();
+    });
+  } else {
+    logger.warn('ADMIN_TOKEN is not set; healthCheck job disabled');
+  }
   const orchestrator = createOrchestrator(ctx);
   scheduler.add('settle', env.SETTLEMENT_CRON, async () => {
     await orchestrator.run();

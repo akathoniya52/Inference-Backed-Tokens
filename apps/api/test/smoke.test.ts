@@ -1,13 +1,16 @@
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createApp } from '../src/app.js';
+import { makeTestApp, type TestApp } from './helpers.js';
 
 describe('@ibt/api', () => {
-  const server = createApp().listen(0);
+  let t: TestApp;
+  let server: ReturnType<TestApp['app']['listen']>;
   let baseUrl = '';
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    t = await makeTestApp();
+    server = t.app.listen(0);
     const { port } = server.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${port}`;
   });
@@ -16,6 +19,7 @@ describe('@ibt/api', () => {
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });
+    await t.close();
   });
 
   it('GET /healthz returns {"ok":true}', async () => {

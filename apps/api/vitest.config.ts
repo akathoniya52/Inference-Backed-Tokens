@@ -5,5 +5,7 @@ export default defineConfig({
   ssr: { resolve: { conditions: ['development'] } },
   test: {
     include: ['test/**/*.test.ts'],
+    globalSetup: ['test/setup.ts'],
+    hookTimeout: 120_000,
   },
 });

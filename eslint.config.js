@@ -47,6 +47,23 @@ export default tseslint.config(
     },
   },
   {
+    files: ['apps/web/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@ibt/shared/node', '@ibt/db', '@ibt/chain/testing'],
+              message:
+                'Node-only module; apps/web is bundled for the browser (import browser-safe code from @ibt/shared).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ['**/*.{js,cjs,mjs}'],
     ...tseslint.configs.disableTypeChecked,
   },

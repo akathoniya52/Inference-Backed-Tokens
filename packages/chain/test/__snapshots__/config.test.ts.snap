@@ -1,0 +1,289 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`buildPartnerConfigParams > matches the committed snapshot for devnet 1`] = `
+{
+  "input": {
+    "activationType": 1,
+    "fee": {
+      "baseFeeParams": {
+        "baseFeeMode": 1,
+        "feeSchedulerParam": {
+          "endingFeeBps": 100,
+          "numberOfPeriod": 60,
+          "startingFeeBps": 3000,
+          "totalDuration": 3600,
+        },
+      },
+      "collectFeeMode": 0,
+      "creatorTradingFeePercentage": 50,
+      "dynamicFeeEnabled": true,
+      "enableFirstSwapWithMinFee": false,
+      "poolCreationFee": 0,
+    },
+    "liquidityDistribution": {
+      "creatorLiquidityPercentage": 0,
+      "creatorPermanentLockedLiquidityPercentage": 50,
+      "partnerLiquidityPercentage": 0,
+      "partnerPermanentLockedLiquidityPercentage": 50,
+    },
+    "lockedVesting": {
+      "cliffDurationFromMigrationTime": 0,
+      "cliffUnlockAmount": 0,
+      "numberOfVestingPeriod": 0,
+      "totalLockedVestingAmount": 0,
+      "totalVestingDuration": 0,
+    },
+    "migration": {
+      "migrationFee": {
+        "creatorFeePercentage": 0,
+        "feePercentage": 0,
+      },
+      "migrationFeeOption": 2,
+      "migrationOption": 1,
+    },
+    "migrationQuoteThreshold": 1,
+    "percentageSupplyOnMigration": 20,
+    "token": {
+      "leftover": 0,
+      "tokenAuthorityOption": 1,
+      "tokenBaseDecimal": 6,
+      "tokenQuoteDecimal": 9,
+      "tokenType": 0,
+      "totalTokenSupply": 1000000000,
+    },
+  },
+  "params": {
+    "activationType": 1,
+    "collectFeeMode": 0,
+    "compoundingFeeBps": 0,
+    "creatorLiquidityPercentage": 0,
+    "creatorLiquidityVestingInfo": {
+      "bpsPerPeriod": 0,
+      "cliffDurationFromMigrationTime": 0,
+      "frequency": 0,
+      "numberOfPeriods": 0,
+      "vestingPercentage": 0,
+    },
+    "creatorPermanentLockedLiquidityPercentage": 50,
+    "creatorTradingFeePercentage": 50,
+    "curve": [
+      {
+        "liquidity": "10999513467186856574015959876923",
+        "sqrtPrice": "41248173712355948",
+      },
+      {
+        "liquidity": "3436021254348803974616125",
+        "sqrtPrice": "79226673521066979257578248091",
+      },
+    ],
+    "enableFirstSwapWithMinFee": false,
+    "lockedVesting": {
+      "amountPerPeriod": "0",
+      "cliffDurationFromMigrationTime": "0",
+      "cliffUnlockAmount": "0",
+      "frequency": "0",
+      "numberOfPeriod": "0",
+    },
+    "migratedPoolBaseFeeMode": 0,
+    "migratedPoolFee": {
+      "collectFeeMode": 0,
+      "dynamicFee": 0,
+      "poolFeeBps": 0,
+    },
+    "migratedPoolMarketCapFeeSchedulerParams": {
+      "numberOfPeriod": 0,
+      "reductionFactor": "0",
+      "schedulerExpirationDuration": 0,
+      "sqrtPriceStepBps": 0,
+    },
+    "migrationFee": {
+      "creatorFeePercentage": 0,
+      "feePercentage": 0,
+    },
+    "migrationFeeOption": 2,
+    "migrationOption": 1,
+    "migrationQuoteThreshold": "1000000000",
+    "padding": [],
+    "partnerLiquidityPercentage": 0,
+    "partnerLiquidityVestingInfo": {
+      "bpsPerPeriod": 0,
+      "cliffDurationFromMigrationTime": 0,
+      "frequency": 0,
+      "numberOfPeriods": 0,
+      "vestingPercentage": 0,
+    },
+    "partnerPermanentLockedLiquidityPercentage": 50,
+    "poolCreationFee": "0",
+    "poolFees": {
+      "baseFee": {
+        "baseFeeMode": 1,
+        "cliffFeeNumerator": "300000000",
+        "firstFactor": 60,
+        "secondFactor": "60",
+        "thirdFactor": "551",
+      },
+      "dynamicFee": {
+        "binStep": 1,
+        "binStepU128": "1844674407370955",
+        "decayPeriod": 120,
+        "filterPeriod": 10,
+        "maxVolatilityAccumulator": 14460000,
+        "reductionFactor": 5000,
+        "variableFeeControl": 956,
+      },
+    },
+    "sqrtStartPrice": "10312044770285001",
+    "tokenDecimal": 6,
+    "tokenSupply": {
+      "postMigrationTokenSupply": "1000000000000000",
+      "preMigrationTokenSupply": "1000000000000000",
+    },
+    "tokenType": 0,
+    "tokenUpdateAuthority": 1,
+  },
+}
+`;
+
+exports[`buildPartnerConfigParams > matches the committed snapshot for mainnet-beta 1`] = `
+{
+  "input": {
+    "activationType": 1,
+    "fee": {
+      "baseFeeParams": {
+        "baseFeeMode": 1,
+        "feeSchedulerParam": {
+          "endingFeeBps": 100,
+          "numberOfPeriod": 60,
+          "startingFeeBps": 3000,
+          "totalDuration": 3600,
+        },
+      },
+      "collectFeeMode": 0,
+      "creatorTradingFeePercentage": 50,
+      "dynamicFeeEnabled": true,
+      "enableFirstSwapWithMinFee": false,
+      "poolCreationFee": 0,
+    },
+    "liquidityDistribution": {
+      "creatorLiquidityPercentage": 0,
+      "creatorPermanentLockedLiquidityPercentage": 50,
+      "partnerLiquidityPercentage": 0,
+      "partnerPermanentLockedLiquidityPercentage": 50,
+    },
+    "lockedVesting": {
+      "cliffDurationFromMigrationTime": 0,
+      "cliffUnlockAmount": 0,
+      "numberOfVestingPeriod": 0,
+      "totalLockedVestingAmount": 0,
+      "totalVestingDuration": 0,
+    },
+    "migration": {
+      "migrationFee": {
+        "creatorFeePercentage": 0,
+        "feePercentage": 0,
+      },
+      "migrationFeeOption": 2,
+      "migrationOption": 1,
+    },
+    "migrationQuoteThreshold": 10,
+    "percentageSupplyOnMigration": 20,
+    "token": {
+      "leftover": 0,
+      "tokenAuthorityOption": 1,
+      "tokenBaseDecimal": 6,
+      "tokenQuoteDecimal": 9,
+      "tokenType": 0,
+      "totalTokenSupply": 1000000000,
+    },
+  },
+  "params": {
+    "activationType": 1,
+    "collectFeeMode": 0,
+    "compoundingFeeBps": 0,
+    "creatorLiquidityPercentage": 0,
+    "creatorLiquidityVestingInfo": {
+      "bpsPerPeriod": 0,
+      "cliffDurationFromMigrationTime": 0,
+      "frequency": 0,
+      "numberOfPeriods": 0,
+      "vestingPercentage": 0,
+    },
+    "creatorPermanentLockedLiquidityPercentage": 50,
+    "creatorTradingFeePercentage": 50,
+    "curve": [
+      {
+        "liquidity": "34783514678091156834964035168207",
+        "sqrtPrice": "130438178253327822",
+      },
+      {
+        "liquidity": "3435866574973078303503357",
+        "sqrtPrice": "79226673521066979257578248091",
+      },
+    ],
+    "enableFirstSwapWithMinFee": false,
+    "lockedVesting": {
+      "amountPerPeriod": "0",
+      "cliffDurationFromMigrationTime": "0",
+      "cliffUnlockAmount": "0",
+      "frequency": "0",
+      "numberOfPeriod": "0",
+    },
+    "migratedPoolBaseFeeMode": 0,
+    "migratedPoolFee": {
+      "collectFeeMode": 0,
+      "dynamicFee": 0,
+      "poolFeeBps": 0,
+    },
+    "migratedPoolMarketCapFeeSchedulerParams": {
+      "numberOfPeriod": 0,
+      "reductionFactor": "0",
+      "schedulerExpirationDuration": 0,
+      "sqrtPriceStepBps": 0,
+    },
+    "migrationFee": {
+      "creatorFeePercentage": 0,
+      "feePercentage": 0,
+    },
+    "migrationFeeOption": 2,
+    "migrationOption": 1,
+    "migrationQuoteThreshold": "10000000000",
+    "padding": [],
+    "partnerLiquidityPercentage": 0,
+    "partnerLiquidityVestingInfo": {
+      "bpsPerPeriod": 0,
+      "cliffDurationFromMigrationTime": 0,
+      "frequency": 0,
+      "numberOfPeriods": 0,
+      "vestingPercentage": 0,
+    },
+    "partnerPermanentLockedLiquidityPercentage": 50,
+    "poolCreationFee": "0",
+    "poolFees": {
+      "baseFee": {
+        "baseFeeMode": 1,
+        "cliffFeeNumerator": "300000000",
+        "firstFactor": 60,
+        "secondFactor": "60",
+        "thirdFactor": "551",
+      },
+      "dynamicFee": {
+        "binStep": 1,
+        "binStepU128": "1844674407370955",
+        "decayPeriod": 120,
+        "filterPeriod": 10,
+        "maxVolatilityAccumulator": 14460000,
+        "reductionFactor": 5000,
+        "variableFeeControl": 956,
+      },
+    },
+    "sqrtStartPrice": "32609545905467449",
+    "tokenDecimal": 6,
+    "tokenSupply": {
+      "postMigrationTokenSupply": "1000000000000000",
+      "preMigrationTokenSupply": "1000000000000000",
+    },
+    "tokenType": 0,
+    "tokenUpdateAuthority": 1,
+  },
+}
+`;

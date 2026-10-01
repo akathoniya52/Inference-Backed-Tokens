@@ -3,9 +3,12 @@ import { randomBytes } from 'node:crypto';
 import { createFakeChain, type FakeChain } from '@ibt/chain/testing';
 import { connection, connectDb, disconnectDb, mongoose, syncAllIndexes } from '@ibt/db';
 import {
+  CreateApiKeyResponseSchema,
   ErrorEnvelopeSchema,
   NonceResponseSchema,
   VerifyResponseSchema,
+  type CreateApiKeyRequest,
+  type CreateApiKeyResponse,
   type ErrorEnvelope,
 } from '@ibt/shared';
 import type { AlertLevel, Alerter } from '@ibt/shared/node';
@@ -166,6 +169,13 @@ export function signMessage(keypair: nacl.SignKeyPair, message: string): string 
   return base58Encode(nacl.sign.detached(new TextEncoder().encode(message), keypair.secretKey));
 }
 
+let signInCounter = 0;
+/** Distinct client IPs so helper sign-ins never trip the 10/min auth limit. */
+function nextSignInIp(): string {
+  signInCounter += 1;
+  return `10.${(signInCounter >> 16) & 255}.${(signInCounter >> 8) & 255}.${signInCounter & 255}`;
+}
+
 export interface SignInOptions {
   /** Client IP sent as `X-Forwarded-For`; vary it to stay under the auth rate limit. */
   ip?: string;
@@ -178,7 +188,7 @@ export async function signIn(
   opts: SignInOptions = {},
 ): Promise<string> {
   const wallet = base58Encode(keypair.publicKey);
-  const ip = opts.ip ?? `192.0.2.${Math.floor(Math.random() * 250) + 1}`;
+  const ip = opts.ip ?? nextSignInIp();
   const nonceRes = await request(app)
     .post('/api/auth/nonce')
     .set('X-Forwarded-For', ip)
@@ -196,4 +206,15 @@ export async function signIn(
 /** `Authorization` header value for a JWT or API key. */
 export function bearer(token: string): string {
   return `Bearer ${token}`;
+}
+
+/** `POST /api/keys` as the JWT's user; the response is the only place the full key appears. */
+export async function createApiKey(
+  app: Express,
+  jwt: string,
+  body: CreateApiKeyRequest = { name: 'test key' },
+): Promise<CreateApiKeyResponse> {
+  const res = await request(app).post('/api/keys').set('Authorization', bearer(jwt)).send(body);
+  if (res.status !== 201) throw new Error(`create key failed: ${res.status}`);
+  return CreateApiKeyResponseSchema.parse(res.body);
 }

@@ -19,6 +19,7 @@ import {
   deriveDammPool,
   depositQuote,
   quoteSwap,
+  quoteSwapDetailed,
   readDammPool,
 } from './damm.js';
 import {
@@ -27,6 +28,7 @@ import {
   type DbcPoolDto,
   type PoolRef,
   quoteBuy,
+  quoteCurveSwap,
   readPool,
   verifyLaunch,
   type VerifyLaunchInput,
@@ -77,6 +79,20 @@ export interface AddAndLockResult extends PositionKeys {
 
 export type SignatureState = 'landed' | 'failed' | 'unknown';
 
+export interface PoolQuoteInput {
+  /** `buy` spends `amount` lamports; `sell` spends `amount` token base units. */
+  side: 'buy' | 'sell';
+  amount: bigint;
+}
+
+/** Read-only swap quote for display (L400); the browser builds the real transaction. */
+export interface PoolQuote {
+  amountIn: bigint;
+  amountOut: bigint;
+  fee: bigint;
+  priceImpactPct: number | null;
+}
+
 export interface ChainClient {
   ping(): Promise<boolean>;
   getParsedTx(signature: string): Promise<ParsedTransactionWithMeta | null>;
@@ -122,6 +138,8 @@ export interface ChainClient {
     opts?: SendOpts,
   ): Promise<TxResult>;
   signatureStatus(signature: string): Promise<SignatureState>;
+  quoteCurve(pool: PublicKey, input: PoolQuoteInput): Promise<PoolQuote>;
+  quoteDamm(mint: PublicKey, input: PoolQuoteInput): Promise<PoolQuote>;
 }
 
 export interface RealChainClientOptions {
@@ -222,6 +240,29 @@ export class RealChainClient implements ChainClient {
 
   usdcBalance(wallet: PublicKey): Promise<bigint> {
     return this.tokenBalance(wallet, this.usdcMint);
+  }
+
+  async quoteCurve(pool: PublicKey, { side, amount }: PoolQuoteInput): Promise<PoolQuote> {
+    const quote = await quoteCurveSwap(this.connection, pool, { side, amountIn: amount });
+    return {
+      amountIn: quote.amountIn,
+      amountOut: quote.outAmount,
+      fee: quote.fee,
+      priceImpactPct: null,
+    };
+  }
+
+  async quoteDamm(mint: PublicKey, { side, amount }: PoolQuoteInput): Promise<PoolQuote> {
+    const quote = await quoteSwapDetailed(this.connection, await this.dammPool(mint), {
+      inputMint: side === 'buy' ? NATIVE_MINT : mint,
+      amountIn: amount,
+    });
+    return {
+      amountIn: quote.amountIn,
+      amountOut: quote.outAmount,
+      fee: quote.fee,
+      priceImpactPct: quote.priceImpactPct,
+    };
   }
 
   transferUsdc(

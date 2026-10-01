@@ -8,6 +8,8 @@ import type {
   AddAndLockInput,
   AddAndLockResult,
   ChainClient,
+  PoolQuote,
+  PoolQuoteInput,
   PositionKeys,
   SendOpts,
   SignatureState,
@@ -328,6 +330,28 @@ export class FakeChain implements ChainClient {
     return Promise.resolve(this.balanceOf(wallet, this.usdcMint));
   }
 
+  /** Fixed-rate mirror of `curveBuy` (buys stop at the curve's remaining room); no fee. */
+  quoteCurve(poolAddress: PublicKey, input: PoolQuoteInput): Promise<PoolQuote> {
+    this.record('quoteCurve', [poolAddress, input]);
+    const pool = this.poolByRef({ pool: poolAddress });
+    if (!pool || pool.isMigrated) {
+      return Promise.reject(new Error('fake chain: curve pool not found'));
+    }
+    const room = this.threshold - pool.quoteReserve;
+    const amountIn = input.side === 'buy' && input.amount > room ? room : input.amount;
+    return Promise.resolve(this.fixedRateQuote(input.side, amountIn < 0n ? 0n : amountIn));
+  }
+
+  /** Fixed-rate mirror of `dammSwap`; no fee, no price impact. */
+  quoteDamm(mint: PublicKey, input: PoolQuoteInput): Promise<PoolQuote> {
+    this.record('quoteDamm', [mint, input]);
+    const pool = this.pools.get(mint.toBase58());
+    if (!pool || pool.dammLiquidity === null) {
+      return Promise.reject(new Error('fake chain: DAMM pool not found'));
+    }
+    return Promise.resolve({ ...this.fixedRateQuote(input.side, input.amount), priceImpactPct: 0 });
+  }
+
   transferUsdc(
     from: Signer,
     toWallet: PublicKey,
@@ -536,6 +560,12 @@ export class FakeChain implements ChainClient {
 
   private record(method: FakeChainMethod, args: unknown[]): void {
     this.calls.push({ method, args });
+  }
+
+  private fixedRateQuote(side: PoolQuoteInput['side'], amountIn: bigint): PoolQuote {
+    const amountOut =
+      side === 'buy' ? amountIn * FAKE_TOKENS_PER_LAMPORT : amountIn / FAKE_TOKENS_PER_LAMPORT;
+    return { amountIn, amountOut, fee: 0n, priceImpactPct: null };
   }
 
   private key(wallet: PublicKey, mint: PublicKey | typeof SOL): string {

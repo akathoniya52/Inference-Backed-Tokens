@@ -167,6 +167,37 @@ export async function quoteBuy(
   };
 }
 
+export interface CurveSwapQuote {
+  amountIn: bigint;
+  outAmount: bigint;
+  /** Trading fee charged by the pool, in the fee token's base units. */
+  fee: bigint;
+}
+
+/** Display quote for either side of the curve: `buy` spends lamports, `sell` spends tokens. */
+export async function quoteCurveSwap(
+  connection: Connection,
+  pool: PublicKey,
+  { side, amountIn }: { side: 'buy' | 'sell'; amountIn: bigint },
+): Promise<CurveSwapQuote> {
+  const found = await poolWithConfig(connection, pool);
+  if (!found) throw new Error(`DBC pool ${pool.toBase58()} not found`);
+  const { client, config } = found;
+  const currentPoint = await getCurrentPoint(connection, config.activationType);
+  const quote = client.pool.swapQuote2({
+    virtualPool: found.pool,
+    config,
+    swapBaseForQuote: side === 'sell',
+    hasReferral: false,
+    eligibleForFirstSwapWithMinFee: false,
+    currentPoint,
+    slippageBps: 0,
+    swapMode: side === 'buy' ? SwapMode.PartialFill : SwapMode.ExactIn,
+    amountIn: toBN(amountIn),
+  });
+  return { amountIn, outAmount: big(quote.outputAmount), fee: big(quote.tradingFee) };
+}
+
 /** SOL → token buy on the curve; the SDK wraps SOL and creates the ATAs. */
 export function buildCurveBuyTx(
   connection: Connection,

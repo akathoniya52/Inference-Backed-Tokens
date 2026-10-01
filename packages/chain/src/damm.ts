@@ -119,6 +119,45 @@ export async function quoteSwap(
   };
 }
 
+export interface DammSwapQuote extends SwapQuote {
+  /** LP (claiming + compounding), protocol and referral fees, in the fee token's base units. */
+  fee: bigint;
+  priceImpactPct: number;
+}
+
+/** `quoteSwap` plus the fee and price impact, for display quotes. */
+export async function quoteSwapDetailed(
+  connection: Connection,
+  pool: DammPool,
+  { inputMint, amountIn }: { inputMint: PublicKey; amountIn: bigint },
+): Promise<DammSwapQuote> {
+  const { state } = pool;
+  const currentPoint = await getDammCurrentPoint(connection, state.activationType);
+  const quote = cpAmm(connection).getQuote2({
+    inputTokenMint: inputMint,
+    slippage: 0,
+    currentPoint,
+    poolState: state,
+    tokenADecimal: decimalsOf(state.tokenAMint),
+    tokenBDecimal: decimalsOf(state.tokenBMint),
+    hasReferral: false,
+    swapMode: DammSwapMode.ExactIn,
+    amountIn: toBN(amountIn),
+  });
+  const outAmount = big(quote.outputAmount);
+  return {
+    amountIn,
+    outAmount,
+    minOut: outAmount,
+    fee:
+      big(quote.claimingFee) +
+      big(quote.compoundingFee) +
+      big(quote.protocolFee) +
+      big(quote.referralFee),
+    priceImpactPct: Number(quote.priceImpact.toString()),
+  };
+}
+
 export function depositQuote(
   connection: Connection,
   { state }: DammPool,

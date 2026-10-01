@@ -59,6 +59,11 @@ const fields = z.object({
   ADMIN_IP_ALLOWLIST: csv,
   RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).optional(),
   DAILY_CAP_USDC: UsdcInputSchema.optional(),
+  /** Keeper SOL float alert threshold for `GET /api/admin/float` (L530). */
+  FLOAT_MIN_SOL: z
+    .string()
+    .regex(/^\d+(\.\d{1,9})?$/, 'must be SOL with up to 9 decimals')
+    .default('0.5'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
 
   JUPITER_PRICE_URL: z.url().optional(),

@@ -12,6 +12,7 @@ import { getAuthUser, getRequestId, type Clock } from './context.js';
 import type { ApiEnv } from './env.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { requestId } from './middleware/requestId.js';
+import { adminRouter } from './modules/admin/router.js';
 import { authRouter } from './modules/auth/router.js';
 import { billingRouter, meRouter } from './modules/billing/router.js';
 import { gatewayRouter } from './modules/gateway/router.js';
@@ -110,6 +111,7 @@ export function createApp(deps: AppDeps): Express {
     res.status(ok ? 200 : 503).json({ ok, mongo, chain: chainOk });
   });
 
+  app.use('/api/admin', adminRouter(ctx));
   app.use('/api/auth', authRouter(ctx));
   app.use('/api/me', meRouter(ctx));
   app.use('/api/billing', billingRouter(ctx));

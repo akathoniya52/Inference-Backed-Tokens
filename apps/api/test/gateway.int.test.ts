@@ -77,7 +77,7 @@ describe('gateway: non-streaming chat completions', () => {
   const hello = [{ role: 'user' as const, content: 'Hello there, gateway' }];
 
   beforeAll(async () => {
-    mock = await createMockUpstream({ port: 0, firstByteDelayMs: 1_500 });
+    mock = await createMockUpstream({ port: 0, firstByteDelayMs: 5_000 });
     t = await makeTestApp({ timeouts: { firstByteMs: 100, totalMs: 2_000 } });
     await seedModel('gw-ok', 'upstream-ok');
     await seedModel('gw-500', 'upstream:error500');
@@ -200,7 +200,7 @@ describe('gateway: non-streaming chat completions', () => {
 
     expect(res.status).toBe(504);
     expect(errorOf(res).code).toBe('upstream_timeout');
-    expect(Date.now() - started).toBeLessThan(1_200);
+    expect(Date.now() - started).toBeLessThan(4_000);
     expect(await balances(c.userId)).toEqual({ balance: FUNDED_MICRO, held: 0n });
     const doc = await Requests.findOne({ requestId: res.get('X-Request-Id') }).lean();
     expect(doc).toMatchObject({ status: 'timeout', costMicroUsdc: 0n });

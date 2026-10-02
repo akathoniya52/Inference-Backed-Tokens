@@ -32,6 +32,7 @@ import {
   PoolService,
   StateService,
   SwapMode,
+  toBN,
   TokenAuthorityOption,
   TokenDecimal,
   TokenType,
@@ -126,6 +127,17 @@ describe('Meteora SDK surface (§4)', () => {
     const a = derivePoolAddress(DAMM_V2_CONFIG_100_BPS, base, NATIVE_MINT);
     const b = derivePoolAddress(DAMM_V2_CONFIG_100_BPS, NATIVE_MINT, base);
     expect(a.toBase58()).toBe(b.toBase58());
+  });
+});
+
+describe('toBN', () => {
+  it('keeps a u128 liquidity delta exact', () => {
+    // Sent to devnet on 2026-10-02 as …689000000000: the SDK's convertToLamports rounds
+    // through decimal.js at 20 significant digits, and cp-amm answered ExceededSlippage.
+    const liquidityDelta = 54_216_811_413_822_396_688_848_514_146n;
+    expect(toBN(liquidityDelta).toString()).toBe('54216811413822396688848514146');
+    expect(toBN(2n ** 128n - 1n).toString()).toBe((2n ** 128n - 1n).toString());
+    expect(toBN(0n).toString()).toBe('0');
   });
 });
 

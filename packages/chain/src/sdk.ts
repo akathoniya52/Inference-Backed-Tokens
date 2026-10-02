@@ -37,8 +37,8 @@
 import * as shared from '@ibt/shared';
 import { NATIVE_MINT } from '@solana/spl-token';
 import { PublicKey } from '@solana/web3.js';
+import BN from 'bn.js';
 import {
-  convertToLamports as sdkConvertToLamports,
   DAMM_V2_MIGRATION_FEE_ADDRESS,
   MigrationFeeOption,
 } from '@meteora-ag/dynamic-bonding-curve-sdk';
@@ -48,7 +48,6 @@ export {
   BaseFeeMode,
   buildCurve,
   CollectFeeMode,
-  convertToLamports,
   CreatorService,
   DAMM_V2_MIGRATION_FEE_ADDRESS,
   DAMM_V2_PROGRAM_ID,
@@ -112,6 +111,10 @@ if (!dammV2Config100Bps) {
 /** DAMM v2 fee config for the 100 bps fixed option (`Hv8Lmz…cjp`), the `dammConfig` for migration. */
 export const DAMM_V2_CONFIG_100_BPS: PublicKey = dammV2Config100Bps;
 
-/** bn.js is not a direct dependency; the SDK's `convertToLamports(x, 0)` builds a BN from an integer. */
-export type BNValue = ReturnType<typeof sdkConvertToLamports>;
-export const toBN = (value: bigint): BNValue => sdkConvertToLamports(value.toString(), 0);
+export type BNValue = BN;
+/**
+ * Exact bigint → BN. The SDKs' `convertToLamports` goes through decimal.js at its default
+ * 20 significant digits; on devnet (2026-10-02) that rounded a u128 liquidity delta and
+ * every DAMM v2 add-liquidity failed with ExceededSlippage.
+ */
+export const toBN = (value: bigint): BN => new BN(value.toString());

@@ -32,6 +32,8 @@ const CPAMM = 'cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG';
 const mint = new PublicKey('AeKcMHrG6M4ydgaH9twWRSDQqMQyXJUsBjxBPK3cUv4F');
 const owner = Keypair.generate().publicKey;
 const address = deriveDammPool(mint);
+/** A real devnet add-liquidity delta; 20-digit rounding turned it into …689000000000. */
+const U128_LIQUIDITY = 54_216_811_413_822_396_688_848_514_146n;
 
 const state = {
   tokenAMint: mint,
@@ -176,7 +178,7 @@ describe('builders', () => {
       pool,
       position,
       positionNftAccount,
-      liquidityDelta: 7_000n,
+      liquidityDelta: U128_LIQUIDITY,
       maxAmountTokenA: 100n,
       maxAmountTokenB: 200n,
     });
@@ -190,7 +192,7 @@ describe('builders', () => {
       tokenAVault: state.tokenAVault,
       tokenBVault: state.tokenBVault,
     });
-    expect(params?.liquidityDelta.toString()).toBe('7000');
+    expect(params?.liquidityDelta.toString()).toBe('54216811413822396688848514146');
     expect(params?.maxAmountTokenB.toString()).toBe('200');
   });
 
@@ -201,11 +203,13 @@ describe('builders', () => {
       pool,
       position,
       positionNftAccount,
-      unlockedLiquidity: 7_000n,
+      unlockedLiquidity: U128_LIQUIDITY,
     });
     expect(programIds(tx)).toEqual([CPAMM]);
     expect(spy.mock.calls[0]?.[0]).toMatchObject({ owner, pool: address, position });
-    expect(spy.mock.calls[0]?.[0].unlockedLiquidity.toString()).toBe('7000');
+    expect(spy.mock.calls[0]?.[0].unlockedLiquidity.toString()).toBe(
+      '54216811413822396688848514146',
+    );
   });
 
   it('claimPositionFee claims to the owner', async () => {

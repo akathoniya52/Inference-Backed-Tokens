@@ -4,7 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHealthServer } from '../src/health-server.js';
 
 describe('@ibt/keeper', () => {
-  const server = createHealthServer().listen(0);
+  // Loopback-specific like every other test listener; a wildcard listen(0) can share a port
+  // with another worker's 127.0.0.1 listener on macOS.
+  const server = createHealthServer().listen(0, '127.0.0.1');
   let baseUrl = '';
 
   beforeAll(() => {

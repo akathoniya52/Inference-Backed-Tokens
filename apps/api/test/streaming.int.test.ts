@@ -58,19 +58,6 @@ function recordWrites(mock: MockUpstream): Buffer[][] {
   return writes;
 }
 
-async function listen(t: TestApp): Promise<Server> {
-  return new Promise<Server>((resolve) => {
-    const s = t.app.listen(0, '127.0.0.1', () => resolve(s));
-  });
-}
-
-async function closeServer(server: Server): Promise<void> {
-  server.closeAllConnections();
-  await new Promise<void>((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
-}
-
 async function waitFor<T>(read: () => Promise<T>, done: (value: T) => boolean): Promise<T> {
   const deadline = Date.now() + 5_000;
   for (;;) {
@@ -111,6 +98,8 @@ describe('gateway: streaming pass-through', () => {
   ): Promise<void> {
     const jwt = await signIn(t.app, newWallet().keypair);
     const me = await request(t.app).get('/api/me').set('Authorization', bearer(jwt));
+    if (me.status !== 200)
+      throw new Error(`/api/me failed: ${me.status} ${JSON.stringify(me.body)}`);
     await Models.create({
       providerId: new Types.ObjectId(MeResponseSchema.parse(me.body).id),
       slug,
@@ -187,8 +176,8 @@ describe('gateway: streaming pass-through', () => {
     const env = { MASTER_KEY: randomBytes(32).toString('hex') };
     t = await makeTestApp({ env, timeouts: { firstByteMs: 2_000, totalMs: 10_000 } });
     shortTotal = await makeTestApp({ env, timeouts: { firstByteMs: 2_000, totalMs: 700 } });
-    server = await listen(t);
-    shortServer = await listen(shortTotal);
+    server = t.app;
+    shortServer = shortTotal.app;
     await seedModel('st-usage', mock, 'upstream:stream', true);
     await seedModel('st-no-flag', mock, 'upstream:stream', false);
     await seedModel('st-no-done', mock, 'upstream:stream-no-done', true);
@@ -197,8 +186,6 @@ describe('gateway: streaming pass-through', () => {
   });
 
   afterAll(async () => {
-    await closeServer(server);
-    await closeServer(shortServer);
     await shortTotal.close();
     await t.close();
     await mock.close();

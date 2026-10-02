@@ -5,20 +5,15 @@ import { makeTestApp, type TestApp } from './helpers.js';
 
 describe('@ibt/api', () => {
   let t: TestApp;
-  let server: ReturnType<TestApp['app']['listen']>;
   let baseUrl = '';
 
   beforeAll(async () => {
     t = await makeTestApp();
-    server = t.app.listen(0);
-    const { port } = server.address() as AddressInfo;
+    const { port } = t.app.address() as AddressInfo;
     baseUrl = `http://127.0.0.1:${port}`;
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve, reject) => {
-      server.close((err) => (err ? reject(err) : resolve()));
-    });
     await t.close();
   });
 

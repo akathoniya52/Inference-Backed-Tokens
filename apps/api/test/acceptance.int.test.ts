@@ -31,9 +31,7 @@ describe('acceptance: OpenAI SDK against the gateway', () => {
   beforeAll(async () => {
     mock = await createMockUpstream({ port: 0 });
     t = await makeTestApp();
-    server = await new Promise<Server>((resolve) => {
-      const s = t.app.listen(0, '127.0.0.1', () => resolve(s));
-    });
+    server = t.app;
     const { port } = server.address() as AddressInfo;
     baseURL = `http://127.0.0.1:${port}/v1`;
 
@@ -60,9 +58,6 @@ describe('acceptance: OpenAI SDK against the gateway', () => {
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve, reject) => {
-      server.close((err) => (err ? reject(err) : resolve()));
-    });
     await t.close();
     await mock.close();
   });

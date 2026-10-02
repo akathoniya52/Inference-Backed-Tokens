@@ -43,7 +43,7 @@ describe('auth', () => {
       .post('/api/auth/nonce')
       .set('X-Forwarded-For', ip)
       .send({ wallet });
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
     return NonceResponseSchema.parse(res.body);
   }
 

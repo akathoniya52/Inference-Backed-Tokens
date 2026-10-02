@@ -32,7 +32,9 @@ describe('GET /metadata/:mint.json', () => {
       .post('/api/tokens/launch/prepare')
       .set('Authorization', bearer(owner))
       .send({ modelId, mint, ...(symbol ? { symbol } : {}) });
-    if (res.status !== 200) throw new Error(`prepare failed: ${res.status}`);
+    if (res.status !== 200) {
+      throw new Error(`prepare failed: ${res.status} ${JSON.stringify(res.body)}`);
+    }
     return mint;
   }
 

@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { createServer, type Server } from 'node:http';
 
 import { createFakeChain, type FakeChain } from '@ibt/chain/testing';
 import { connection, connectDb, disconnectDb, mongoose, syncAllIndexes } from '@ibt/db';
@@ -40,7 +41,15 @@ export interface TestClock {
 }
 
 export interface TestApp {
-  app: Express;
+  /**
+   * The app, already listening on 127.0.0.1. Pass it to supertest as-is: supertest then reuses
+   * this socket instead of binding a fresh wildcard port per request. A wildcard `listen(0)` can
+   * be handed a port that another worker's `127.0.0.1` listener (mock upstream, api server) just
+   * took, and the loopback connection then reaches that server instead: 404s and 401s from the
+   * wrong process, about once per few thousand requests on macOS.
+   */
+  app: Server;
+  express: Express;
   chain: FakeChain;
   env: ApiEnv;
   alerter: RecordingAlerter;
@@ -121,7 +130,7 @@ export async function makeTestApp(opts: MakeTestAppOptions = {}): Promise<TestAp
   const chain = createFakeChain();
   const alerter = createRecordingAlerter();
   const clock = createTestClock(opts.now);
-  const app = createApp({
+  const express = createApp({
     env,
     chain,
     alerter,
@@ -130,9 +139,18 @@ export async function makeTestApp(opts: MakeTestAppOptions = {}): Promise<TestAp
     ...(opts.extraRoutes ? { extraRoutes: opts.extraRoutes } : {}),
     ...(opts.logger ? { logger: opts.logger } : {}),
   });
+  const app = createServer(express);
+  await new Promise<void>((resolve, reject) => {
+    app.once('error', reject);
+    app.listen(0, '127.0.0.1', () => {
+      app.off('error', reject);
+      resolve();
+    });
+  });
   let closed = false;
   return {
     app,
+    express,
     chain,
     env,
     alerter,
@@ -140,6 +158,12 @@ export async function makeTestApp(opts: MakeTestAppOptions = {}): Promise<TestAp
     async close() {
       if (closed) return;
       closed = true;
+      if (app.listening) {
+        app.closeAllConnections();
+        await new Promise<void>((resolve, reject) => {
+          app.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
       openApps -= 1;
       if (openApps === 0 && connection.readyState === mongoose.ConnectionStates.connected) {
         await connection.dropDatabase();
@@ -185,7 +209,7 @@ export interface SignInOptions {
 
 /** Runs nonce → sign → verify and returns the JWT. */
 export async function signIn(
-  app: Express,
+  app: Server,
   keypair: nacl.SignKeyPair,
   opts: SignInOptions = {},
 ): Promise<string> {
@@ -212,11 +236,13 @@ export function bearer(token: string): string {
 
 /** `POST /api/keys` as the JWT's user; the response is the only place the full key appears. */
 export async function createApiKey(
-  app: Express,
+  app: Server,
   jwt: string,
   body: CreateApiKeyRequest = { name: 'test key' },
 ): Promise<CreateApiKeyResponse> {
   const res = await request(app).post('/api/keys').set('Authorization', bearer(jwt)).send(body);
-  if (res.status !== 201) throw new Error(`create key failed: ${res.status}`);
+  if (res.status !== 201) {
+    throw new Error(`create key failed: ${res.status} ${JSON.stringify(res.body)}`);
+  }
   return CreateApiKeyResponseSchema.parse(res.body);
 }

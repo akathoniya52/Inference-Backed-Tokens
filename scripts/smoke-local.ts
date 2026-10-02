@@ -127,8 +127,6 @@ async function pickPort(label: string, envName: string, fallback: number): Promi
   return port;
 }
 
-// ---- child processes ---------------------------------------------------------------------
-
 interface Child {
   name: string;
   proc: ChildProcess;

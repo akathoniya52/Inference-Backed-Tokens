@@ -1,4 +1,4 @@
-import type { Model, TokenStateResponse } from '@ibt/shared';
+import type { Model, PricePoint, TokenStateResponse } from '@ibt/shared';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
@@ -7,11 +7,12 @@ import { CopyButton } from '../components/CodeBlock';
 import { CurveProgress } from '../components/CurveProgress';
 import { formatMTokPrice, PhaseBadge } from '../components/ModelCard';
 import { AddressLink, EXTERNAL_LINK, ModelStats } from '../components/ModelStats';
+import { MIN_CHART_POINTS, PriceChart } from '../components/PriceChart';
 import { SettlementTable } from '../components/SettlementTable';
 import { TradePanel } from '../components/TradePanel';
 import { isApiError } from '../lib/api';
 import { shortAddress } from '../lib/format';
-import { useModel, useTokenState } from '../lib/queries';
+import { useModel, usePriceSnapshots, useTokenState } from '../lib/queries';
 import { txUrl } from '../lib/solscan';
 
 export interface TokenSlotContext {
@@ -42,12 +43,23 @@ function TokenHeading({ slug }: { slug: string }) {
   );
 }
 
-function PhasePanel({ model }: { model: Model }) {
+interface PhasePanelProps {
+  model: Model;
+  /** Price series to chart, or `null` to render the panel without one. */
+  pricePoints: readonly PricePoint[] | null;
+}
+
+function PhasePanel({ model, pricePoints }: PhasePanelProps) {
   const { token } = model;
 
   if (token.status === 'curve' && token.mint !== null) {
     return (
       <section aria-label="Bonding curve" className={PANEL}>
+        {pricePoints !== null && (
+          <div className="mb-6 border-b border-ink-800 pb-6">
+            <PriceChart points={pricePoints} />
+          </div>
+        )}
         <CurveProgress mint={token.mint} />
         <p className="mt-4 text-sm text-ink-400">
           Twenty percent of every settled hour of inference revenue buys this token on the curve. At
@@ -62,6 +74,11 @@ function PhasePanel({ model }: { model: Model }) {
     return (
       <section aria-label="Graduated" className={PANEL}>
         <p className={SECTION_LABEL}>Graduated to DAMM v2</p>
+        {pricePoints !== null && (
+          <div className="mt-4 border-b border-ink-800 pb-6">
+            <PriceChart points={pricePoints} />
+          </div>
+        )}
         <dl className="mt-4 grid gap-4 font-mono text-sm sm:grid-cols-2">
           <div>
             <dt className="text-xs text-ink-400">Pool</dt>
@@ -119,6 +136,11 @@ export function TokenPage({
   const live = token !== undefined && (token.status === 'curve' || token.status === 'graduated');
   const mint = live ? token.mint : null;
   const state = useTokenState(mint);
+  const snapshots = usePriceSnapshots(mint);
+  const pricePoints =
+    snapshots.data !== undefined && snapshots.data.points.length >= MIN_CHART_POINTS
+      ? snapshots.data.points
+      : null;
 
   if (model.isPending) {
     return (
@@ -218,7 +240,7 @@ export function TokenPage({
 
       <div className="mt-10 grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
-          <PhasePanel model={data} />
+          <PhasePanel model={data} pricePoints={pricePoints} />
           <ModelStats model={data} state={state.data} />
         </div>
         <aside className="space-y-6">

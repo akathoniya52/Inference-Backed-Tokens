@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { chartMock } from '../fixtures/lightweightCharts';
 import { mockApi } from '../fixtures/mockApi';
 import {
   CURVE_MINT,
@@ -14,6 +15,7 @@ import {
 } from '../fixtures/models';
 import {
   curveSettlementsPage,
+  curveSnapshots,
   curveTokenState,
   emptySettlements,
   graduatedTokenState,
@@ -21,6 +23,8 @@ import {
 import { routerFuture, routerProviderFuture } from '../router';
 import { renderRoute, TestProviders } from '../test-utils';
 import { TokenPage } from './TokenPage';
+
+vi.mock('lightweight-charts', () => import('../fixtures/lightweightCharts'));
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -31,6 +35,7 @@ function mockCurve() {
     { path: `/api/models/${curveModel.slug}`, body: curveModel },
     { path: `/api/tokens/${CURVE_MINT}/state`, body: curveTokenState },
     { path: `/api/tokens/${CURVE_MINT}/settlements`, body: curveSettlementsPage },
+    { path: `/api/tokens/${CURVE_MINT}/snapshots`, body: curveSnapshots },
   ]);
 }
 
@@ -54,6 +59,9 @@ describe('TokenPage', () => {
 
     const bar = await screen.findByRole('progressbar');
     expect(bar.getAttribute('aria-valuenow')).toBe('42');
+    const chart = await screen.findByRole('figure', { name: 'Token price chart' });
+    expect(chart.compareDocumentPosition(bar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(chartMock.setData).toHaveBeenCalled();
     expect(screen.getByText('Requests 24h', { selector: 'dt' })).toBeTruthy();
     expect(await screen.findByText('2 Oct 2026, 13:00–14:00 UTC')).toBeTruthy();
     expect(document.querySelector('[data-slot="trade-panel"]')).not.toBeNull();

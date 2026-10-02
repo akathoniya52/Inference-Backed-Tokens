@@ -1,8 +1,15 @@
-import type { Settlement, SettlementsResponse, TokenStateResponse } from '@ibt/shared';
+import type {
+  PricePoint,
+  Settlement,
+  SettlementsResponse,
+  TokenSnapshotsResponse,
+  TokenStateResponse,
+} from '@ibt/shared';
 
 import {
   curveModel,
   CURVE_DBC_POOL,
+  CURVE_MINT,
   GRADUATED_DAMM_POOL,
   GRADUATED_DBC_POOL,
   graduatedModel,
@@ -123,3 +130,22 @@ export const curveSettlementsPage: SettlementsResponse = {
 };
 
 export const emptySettlements: SettlementsResponse = { items: [], nextCursor: null };
+
+// Shape of `GET /api/tokens/:mint/snapshots` (P7-T10): one point per 15 s keeper poll.
+const curvePoint = (ts: string, priceSolPerToken: string, progress: number): PricePoint => ({
+  ts,
+  priceSolPerToken,
+  progress,
+  phase: 'curve',
+});
+
+export const curveSnapshots: TokenSnapshotsResponse = {
+  mint: CURVE_MINT,
+  points: [
+    curvePoint('2026-10-02T13:59:00.000Z', '0.0000000052', 0.36),
+    curvePoint('2026-10-02T13:59:15.000Z', '0.0000000055', 0.38),
+    curvePoint('2026-10-02T13:59:30.000Z', '0.0000000054', 0.37),
+    curvePoint('2026-10-02T13:59:45.000Z', '0.0000000058', 0.4),
+    curvePoint('2026-10-02T14:00:00.000Z', '0.0000000061', 0.42),
+  ],
+};

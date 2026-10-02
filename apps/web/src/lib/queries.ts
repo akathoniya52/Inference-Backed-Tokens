@@ -1,8 +1,9 @@
-import type {
-  ListModelsResponse,
-  Model,
-  SettlementsResponse,
-  TokenStateResponse,
+import {
+  TokenSnapshotsResponseSchema,
+  type ListModelsResponse,
+  type Model,
+  type SettlementsResponse,
+  type TokenStateResponse,
 } from '@ibt/shared';
 import { skipToken, useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
@@ -14,6 +15,8 @@ import { queryKeys } from './queryKeys';
 
 export const TOKEN_STATE_REFETCH_MS = 10_000;
 export const SETTLEMENTS_REFETCH_MS = 60_000;
+/** Matches the keeper's pool poll interval, so each refetch can bring one new point. */
+export const SNAPSHOTS_REFETCH_MS = 15_000;
 export const MODELS_PAGE_LIMIT = 24;
 
 export const publicQueryKeys = {
@@ -21,6 +24,7 @@ export const publicQueryKeys = {
   model: (slug: string) => ['model', slug] as const,
   tokenState: (mint: string) => ['tokenState', mint] as const,
   settlements: (mint: string) => ['settlements', mint] as const,
+  priceSnapshots: (mint: string) => ['priceSnapshots', mint] as const,
 };
 
 function pageQuery(cursor: string | null, limit?: number): string {
@@ -78,6 +82,20 @@ export function useSettlements(mint: string | null) {
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
     refetchInterval: SETTLEMENTS_REFETCH_MS,
+  });
+}
+
+export function usePriceSnapshots(mint: string | null) {
+  return useQuery({
+    queryKey: publicQueryKeys.priceSnapshots(mint ?? ''),
+    queryFn:
+      mint === null
+        ? skipToken
+        : async ({ signal }) =>
+            TokenSnapshotsResponseSchema.parse(
+              await apiFetch(`/api/tokens/${encodeURIComponent(mint)}/snapshots`, { signal }),
+            ),
+    refetchInterval: SNAPSHOTS_REFETCH_MS,
   });
 }
 

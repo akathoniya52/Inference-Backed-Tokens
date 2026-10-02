@@ -1,11 +1,11 @@
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { Models, Types, adjust } from '@ibt/db';
+import { Models, Requests, Types, adjust } from '@ibt/db';
 import { createMockUpstream, type MockUpstream } from '@ibt/mock-upstream';
 import { LedgerResponseSchema, MeResponseSchema } from '@ibt/shared';
 import { encrypt } from '@ibt/shared/node';
-import OpenAI, { AuthenticationError, BadRequestError } from 'openai';
+import OpenAI, { AuthenticationError } from 'openai';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -93,19 +93,31 @@ describe('acceptance: OpenAI SDK against the gateway', () => {
     expect(ids).toContain('mock-llm');
   });
 
-  it('stream: true surfaces a 400 invalid_request', async () => {
-    const err: unknown = await sdk(key)
-      .chat.completions.create({
-        model: 'mock-llm',
-        messages: [{ role: 'user', content: 'Hello' }],
-        stream: true,
-      })
-      .then(
-        () => null,
-        (e: unknown) => e,
-      );
-    expect(err).toBeInstanceOf(BadRequestError);
-    expect(err).toMatchObject({ status: 400, code: 'invalid_request' });
+  it('stream: true yields chunks and the ledger shows a capture for it', async () => {
+    const stream = await sdk(key).chat.completions.create({
+      model: 'mock-llm',
+      messages: [{ role: 'user', content: 'Hello stream' }],
+      max_tokens: 64,
+      stream: true,
+    });
+    let text = '';
+    for await (const chunk of stream) text += chunk.choices[0]?.delta.content ?? '';
+    expect(text).toBe('Echo: Hello stream');
+
+    // The SDK stops at `[DONE]`, which can reach it before the gateway's capture commits.
+    let streamed = await Requests.findOne({ status: 'success', streamed: true }).lean();
+    for (let i = 0; streamed === null && i < 100; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      streamed = await Requests.findOne({ status: 'success', streamed: true }).lean();
+    }
+    expect(streamed).not.toBeNull();
+    const ledgerRes = await request(t.app)
+      .get('/api/billing/ledger')
+      .set('Authorization', bearer(jwt));
+    const rows = LedgerResponseSchema.parse(ledgerRes.body).items;
+    expect(
+      rows.some((row) => row.type === 'capture' && row.ref.requestId === streamed?.requestId),
+    ).toBe(true);
   });
 
   it('a revoked key gets an AuthenticationError', async () => {

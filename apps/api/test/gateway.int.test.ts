@@ -235,11 +235,17 @@ describe('gateway: non-streaming chat completions', () => {
     ).toBe(0);
   });
 
-  it('rejects stream: true (streaming is cut) without a hold', async () => {
+  it('streams stream: true as server-sent events and captures it', async () => {
     const c = await consumer();
     const res = await chat(c.key, { model: 'gw-ok', messages: hello, stream: true });
-    expect(res.status).toBe(400);
-    expect(errorOf(res).code).toBe('invalid_request');
-    expect(await balances(c.userId)).toEqual({ balance: FUNDED_MICRO, held: 0n });
+    expect(res.status).toBe(200);
+    expect(res.get('Content-Type')).toContain('text/event-stream');
+    expect(res.text).toContain('data: [DONE]');
+    const doc = await Requests.findOne({ requestId: res.get('X-Request-Id') }).lean();
+    expect(doc).toMatchObject({ status: 'success', streamed: true });
+    expect(await balances(c.userId)).toEqual({
+      balance: FUNDED_MICRO - (doc?.costMicroUsdc ?? 0n),
+      held: 0n,
+    });
   });
 });

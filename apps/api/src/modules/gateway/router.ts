@@ -18,6 +18,7 @@ import { apiKeyAuth } from '../../middleware/apiKeyAuth.js';
 import { createRateLimit } from '../../middleware/rateLimit.js';
 import { parseInput } from '../../validate.js';
 import { completeChat } from './completions.js';
+import { streamChat } from './stream.js';
 
 interface ActiveModelRow {
   _id: Types.ObjectId;
@@ -91,17 +92,13 @@ export function gatewayRouter(ctx: AppContext): Router {
   router.post('/chat/completions', async (req, res) => {
     const key = requireApiKeyContext(req);
     const { body, maxTokens } = validateChatRequest(req.body);
-    if (body.stream === true) {
-      throw new AppError('invalid_request', { message: 'streaming is not supported' });
-    }
     const model = await resolveModel(body.model);
-    const result = await completeChat(ctx, {
-      requestId: getRequestId(req) ?? randomUUID(),
-      key,
-      model,
-      body,
-      maxTokens,
-    });
+    const input = { requestId: getRequestId(req) ?? randomUUID(), key, model, body, maxTokens };
+    if (body.stream === true) {
+      await streamChat(ctx, input, res);
+      return;
+    }
+    const result = await completeChat(ctx, input);
     res.set(result.headers).type('application/json').send(result.rawBody);
   });
 

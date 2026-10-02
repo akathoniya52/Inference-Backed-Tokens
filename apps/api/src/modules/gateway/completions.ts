@@ -2,6 +2,7 @@ import { Requests, Types, capture, hold, release, type RequestRecord } from '@ib
 import {
   AppError,
   ChatCompletionResponseSchema,
+  GATEWAY_RESPONSE_HEADERS,
   computeCostMicro,
   estimateHoldMicro,
   microToUsdcString,
@@ -34,13 +35,30 @@ type UpstreamOutcome =
   | { ok: true; rawBody: string; parsed: ChatCompletionResponse; upstreamStatus: number }
   | { ok: false; status: 'upstream_error' | 'timeout'; upstreamStatus: number | null };
 
-/** `X-Discount-Bps` is always 0: the holder discount (P4-T8) is cut from the MVP. */
+/** `X-Discount-Bps` is always 0 until the holder discount (P4-T8). */
 const DISCOUNT_BPS = 0;
 
-function upstreamBody(model: ResolvedModel, body: ChatCompletionRequest): string {
-  // Non-streaming only (P4-T6 is cut), so `stream_options` is never forwarded (G28).
+/**
+ * Body sent upstream: the provider's model name, and `stream_options` only on a
+ * streamed call to an upstream flagged `supportsStreamUsage` (G28); some
+ * upstreams reject the field with a 400.
+ */
+export function upstreamBody(
+  model: ResolvedModel,
+  body: ChatCompletionRequest,
+  stream: boolean,
+): string {
   const { stream_options: _streamOptions, ...rest } = body;
-  return JSON.stringify({ ...rest, model: model.upstream.modelName, stream: false });
+  const usageOption =
+    stream && model.upstream.supportsStreamUsage ? { stream_options: { include_usage: true } } : {};
+  return JSON.stringify({ ...rest, model: model.upstream.modelName, stream, ...usageOption });
+}
+
+export function upstreamHeaders(ctx: AppContext, model: ResolvedModel): Record<string, string> {
+  return {
+    'content-type': 'application/json',
+    authorization: `Bearer ${decrypt(model.upstream.apiKeyEnc, ctx.env.MASTER_KEY)}`,
+  };
 }
 
 function parseCompletion(text: string): ChatCompletionResponse | null {
@@ -71,11 +89,8 @@ async function callUpstream(
   try {
     const res = await request(chatCompletionsUrl(model.upstream.baseUrl), {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${decrypt(model.upstream.apiKeyEnc, ctx.env.MASTER_KEY)}`,
-      },
-      body: upstreamBody(model, body),
+      headers: upstreamHeaders(ctx, model),
+      body: upstreamBody(model, body, false),
       headersTimeout: firstByteMs,
       bodyTimeout: totalMs,
       signal,
@@ -116,10 +131,7 @@ function completionText(response: ChatCompletionResponse): string {
 }
 
 /** Upstream usage when present, else a tiktoken count flagged `usageEstimated` (L147). */
-function usageOf(
-  response: ChatCompletionResponse,
-  body: ChatCompletionRequest,
-): { promptTokens: number; completionTokens: number; usageEstimated: boolean } {
+function usageOf(response: ChatCompletionResponse, body: ChatCompletionRequest): UsageCount {
   if (response.usage) {
     return {
       promptTokens: response.usage.prompt_tokens,
@@ -161,14 +173,21 @@ async function assertUnderDailyCap(ctx: AppContext, key: ApiKeyContext): Promise
   }
 }
 
-/**
- * Gateway steps 3–6 (L236–239) for a non-streaming call: hold the worst case,
- * forward, then capture the actual cost or release the hold on failure.
- */
-export async function completeChat(
-  ctx: AppContext,
-  input: CompletionInput,
-): Promise<CompletionResult> {
+export interface Pricing {
+  inPrice: bigint;
+  outPrice: bigint;
+}
+
+export interface OpenHold {
+  holdId: Types.ObjectId;
+  /** Worst-case cost after the discount; also the billing cap (G14). */
+  estimate: bigint;
+  pricing: Pricing;
+  discountBps: number;
+}
+
+/** Gateway steps 3–4 (L236–237): reuse and daily-cap checks, then hold the worst case. */
+export async function openHold(ctx: AppContext, input: CompletionInput): Promise<OpenHold> {
   const { requestId, key, model, body } = input;
   if (await Requests.exists({ requestId })) {
     throw new AppError('invalid_request', { message: 'X-Request-Id was already used' });
@@ -187,6 +206,49 @@ export async function completeChat(
   });
   // `hold` needs a positive amount; a free model still reserves one micro-USDC.
   const { holdId } = await hold(key.userId, estimate > 0n ? estimate : 1n, { requestId });
+  return { holdId, estimate, pricing, discountBps: DISCOUNT_BPS };
+}
+
+export interface UsageCount {
+  promptTokens: number;
+  completionTokens: number;
+  usageEstimated: boolean;
+}
+
+/** Actual cost of the call, capped at the hold. */
+export function billedCost(
+  ctx: AppContext,
+  requestId: string,
+  held: OpenHold,
+  usage: UsageCount,
+): bigint {
+  const cost = computeCostMicro({
+    pt: usage.promptTokens,
+    ct: usage.completionTokens,
+    ...held.pricing,
+  });
+  // The hold is the overdraft guard (G14): never bill past it, even if the
+  // upstream's tokenizer counts more prompt tokens than tiktoken did.
+  const billed = cost > held.estimate ? held.estimate : cost;
+  if (billed < cost) {
+    ctx.logger.warn(
+      { requestId, cost: cost.toString(), estimate: held.estimate.toString() },
+      'upstream usage exceeded the hold estimate; billing the estimate',
+    );
+  }
+  return billed;
+}
+
+/**
+ * Gateway steps 3–6 (L236–239) for a non-streaming call: hold the worst case,
+ * forward, then capture the actual cost or release the hold on failure.
+ */
+export async function completeChat(
+  ctx: AppContext,
+  input: CompletionInput,
+): Promise<CompletionResult> {
+  const { requestId, key, model, body } = input;
+  const held = await openHold(ctx, input);
 
   const started = performance.now();
   const outcome = await callUpstream(ctx, model, body);
@@ -197,11 +259,11 @@ export async function completeChat(
     latencyMs: Math.round(performance.now() - started),
     streamed: false,
     upstreamStatus: outcome.upstreamStatus,
-    discountBps: DISCOUNT_BPS,
+    discountBps: held.discountBps,
   } satisfies Partial<RequestRecord>;
 
   if (!outcome.ok) {
-    await release(holdId, {
+    await release(held.holdId, {
       ...record,
       status: outcome.status,
       promptTokens: 0,
@@ -211,17 +273,8 @@ export async function completeChat(
   }
 
   const usage = usageOf(outcome.parsed, body);
-  const cost = computeCostMicro({ pt: usage.promptTokens, ct: usage.completionTokens, ...pricing });
-  // The hold is the overdraft guard (G14): never bill past it, even if the
-  // upstream's tokenizer counts more prompt tokens than tiktoken did.
-  const billed = cost > estimate ? estimate : cost;
-  if (billed < cost) {
-    ctx.logger.warn(
-      { requestId, cost: cost.toString(), estimate: estimate.toString() },
-      'upstream usage exceeded the hold estimate; billing the estimate',
-    );
-  }
-  const { balanceMicro } = await capture(holdId, billed, {
+  const billed = billedCost(ctx, requestId, held, usage);
+  const { balanceMicro } = await capture(held.holdId, billed, {
     ...record,
     status: 'success',
     ...usage,
@@ -229,10 +282,18 @@ export async function completeChat(
 
   return {
     rawBody: outcome.rawBody,
-    headers: {
-      'X-Cost-Usdc': microToUsdcString(billed),
-      'X-Balance-Usdc': microToUsdcString(balanceMicro),
-      'X-Discount-Bps': String(DISCOUNT_BPS),
-    },
+    headers: billingHeaders(billed, balanceMicro, held.discountBps),
+  };
+}
+
+export function billingHeaders(
+  costMicro: bigint,
+  balanceMicro: bigint,
+  discountBps: number,
+): Record<string, string> {
+  return {
+    [GATEWAY_RESPONSE_HEADERS.costUsdc]: microToUsdcString(costMicro),
+    [GATEWAY_RESPONSE_HEADERS.balanceUsdc]: microToUsdcString(balanceMicro),
+    [GATEWAY_RESPONSE_HEADERS.discountBps]: String(discountBps),
   };
 }

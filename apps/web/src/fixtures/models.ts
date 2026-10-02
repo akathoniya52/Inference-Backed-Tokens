@@ -1,6 +1,6 @@
 import type { ListModelsResponse, Model } from '@ibt/shared';
 
-// Typed API fixtures shaped like `GET /api/models` (spec L396, P3-T5). Keys and
+// Typed API fixtures shaped like `GET /api/models` (spec L391, P3-T5). Keys and
 // signatures are random but valid base58 so they pass the shared schemas.
 
 export const CURVE_MINT = '4h5YAMFmKhoGQSCvr3QRnWpdeZcDv33m29GxHyEozqHx';

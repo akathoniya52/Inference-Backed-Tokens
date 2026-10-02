@@ -2,7 +2,7 @@ import { CpAmm, getTokenProgram } from '@meteora-ag/cp-amm-sdk';
 import { DynamicBondingCurveClient, U64_MAX } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import { Transaction, type Connection, type PublicKey } from '@solana/web3.js';
 
-// Fee claims (spec L120, L498). The provider is the DBC pool creator and owns
+// Fee claims (spec L125, L498). The provider is the DBC pool creator and owns
 // a permanently locked DAMM v2 position after migration; the treasury wallet
 // is the config's `feeClaimer` and collects the partner share of curve fees.
 

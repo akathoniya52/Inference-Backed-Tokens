@@ -22,7 +22,7 @@ export interface DepositTxInput {
 
 /**
  * USDC `transferChecked` from the owner's ATA to the treasury ATA plus a memo
- * carrying `depositRef`, the shape the api's `parseDeposit` accepts (L432–437).
+ * carrying `depositRef`, the shape the api's `parseDeposit` accepts (L491, L519).
  */
 export function buildDepositTransaction({
   owner,

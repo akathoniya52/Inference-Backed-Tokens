@@ -22,9 +22,9 @@ export interface TokenSlotContext {
 type Slot = (context: TokenSlotContext) => ReactNode;
 
 interface TokenPageProps {
-  /** Mount point for the P7-T5 TradePanel. */
+  /** Replaces the default `TradePanel`; tests inject a stub. */
   tradePanel?: Slot;
-  /** Mount point for the P7-T8 ClaimFees (owner only). */
+  /** Replaces the default owner-only `ClaimFees`; tests inject a stub. */
   claimFees?: Slot;
 }
 

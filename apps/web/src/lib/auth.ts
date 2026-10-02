@@ -1,4 +1,4 @@
-// The session JWT lives in module memory only (spec L489): a reload signs the
+// The session JWT lives in module memory only (spec L490): a reload signs the
 // user out, and nothing readable by other scripts persists it.
 
 export interface Session {

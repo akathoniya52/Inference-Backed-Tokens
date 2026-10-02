@@ -63,7 +63,7 @@ export interface UseSignIn {
   error: string | null;
 }
 
-/** nonce → `signMessage` → verify → in-memory JWT (spec L489, P3-T3). */
+/** nonce → `signMessage` → verify → in-memory JWT (spec L490, P3-T3). */
 export function useSignIn(): UseSignIn {
   const { publicKey, signMessage } = useWallet();
   const [status, setStatus] = useState<SignInStatus>('idle');

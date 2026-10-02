@@ -5,6 +5,7 @@ import {
   type Commitment,
   type RpcResponseAndContext,
   type SendOptions,
+  SendTransactionError,
   type SignatureResult,
   type SignatureStatus,
   type SignatureStatusConfig,
@@ -105,6 +106,13 @@ async function hasLanded(
  * Sends with a fresh blockhash per attempt and never re-sends a transaction
  * that already landed (Plan.md L258). `onSigned` is awaited before every
  * `sendRawTransaction`; if it throws, nothing is sent.
+ *
+ * A new attempt is only made when the previous one is provably dead: the
+ * blockhash expired without the tx landing, the RPC rejected the send
+ * (`SendTransactionError`, nothing forwarded), or the tx landed with an
+ * on-chain error. Anything else (network error, timeout, proxy 5xx) may have
+ * reached the cluster, so the call fails with `chain_send_failed` and the
+ * caller must resolve the persisted signature first (keeper: `pendingTx`).
  */
 export async function sendAndConfirm(input: SendAndConfirmInput): Promise<SendResult> {
   const { connection, commitment } = input;
@@ -150,7 +158,15 @@ export async function sendAndConfirm(input: SendAndConfirmInput): Promise<SendRe
         if (await hasLanded(connection, signature, commitment)) {
           return { signature, landed: true, attempts: attempt };
         }
+        continue;
       }
+      // The RPC answered the send with an error, so nothing was forwarded: safe to re-sign.
+      if (err instanceof SendTransactionError) continue;
+      // Not provably dropped: the tx may still land. Never re-sign here (L258).
+      throw new AppError('chain_send_failed', {
+        message: 'send outcome unknown; resolve the persisted signature before retrying',
+        cause: err,
+      });
     }
   }
 

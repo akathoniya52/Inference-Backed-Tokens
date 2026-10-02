@@ -1,5 +1,11 @@
 import { AppError } from '@ibt/shared';
-import { Connection, Keypair, SystemProgram, Transaction } from '@solana/web3.js';
+import {
+  Connection,
+  Keypair,
+  SendTransactionError,
+  SystemProgram,
+  Transaction,
+} from '@solana/web3.js';
 import { describe, expect, it, vi } from 'vitest';
 
 import { sendAndConfirm, type SendConnection } from '../src/send.js';
@@ -88,6 +94,61 @@ describe('sendAndConfirm', () => {
     expect(err).toMatchObject({ code: 'chain_send_failed' });
     expect((err as AppError).cause).toBeInstanceOf(Error);
     expect(connection.count('sendRawTransaction')).toBe(3);
+  });
+
+  it('never re-signs after a network error on send: the first tx may still land', async () => {
+    const connection = new FakeConnection();
+    connection.queueSendError(new TypeError('fetch failed'));
+    const onSigned = vi.fn();
+    const err = await sendAndConfirm({
+      connection,
+      tx: transferTx(),
+      signers: [payer],
+      onSigned,
+      commitment: 'confirmed',
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err).toMatchObject({ code: 'chain_send_failed' });
+    expect((err as AppError).cause).toEqual(new TypeError('fetch failed'));
+    expect(connection.count('sendRawTransaction')).toBe(1);
+    expect(connection.count('getLatestBlockhash')).toBe(1);
+    expect(onSigned).toHaveBeenCalledTimes(1);
+  });
+
+  it('never re-signs after a network error on confirm', async () => {
+    const connection = new FakeConnection();
+    connection.queueConfirm(new Error('ECONNRESET'));
+    const err = await sendAndConfirm({
+      connection,
+      tx: transferTx(),
+      signers: [payer],
+      commitment: 'confirmed',
+    }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: 'chain_send_failed' });
+    expect(connection.count('sendRawTransaction')).toBe(1);
+  });
+
+  it('re-signs after the RPC rejects the send with SendTransactionError', async () => {
+    const connection = new FakeConnection();
+    connection.queueSendError(
+      new SendTransactionError({
+        action: 'send',
+        signature: 'x',
+        transactionMessage: 'Blockhash not found',
+      }),
+    );
+    const buildTx = vi.fn(transferTx);
+    const result = await sendAndConfirm({
+      connection,
+      buildTx,
+      signers: [payer],
+      commitment: 'confirmed',
+    });
+    expect(result.attempts).toBe(2);
+    expect(buildTx).toHaveBeenCalledTimes(2);
+    expect(connection.count('sendRawTransaction')).toBe(2);
+    expect(connection.sent).toHaveLength(1);
+    expect(result.signature).toBe(connection.sent[0]?.signature);
   });
 
   it('awaits onSigned before sendRawTransaction on every attempt', async () => {

@@ -153,7 +153,7 @@ export async function createModel(
     }
     throw err;
   }
-  // Admins keep their role; consumers become providers (L224).
+  // Admins keep their role; consumers become providers (L392).
   await Users.updateOne({ _id: providerId, role: 'consumer' }, { $set: { role: 'provider' } });
   return toOwnerDto(created, await walletOf(created));
 }

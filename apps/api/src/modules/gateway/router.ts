@@ -48,7 +48,7 @@ export function validateChatRequest(body: unknown): ValidatedChatRequest {
   return { body: parsed, maxTokens: effectiveMaxTokens(parsed) };
 }
 
-/** OpenAI-style `GET /v1/models` over active models (L388). */
+/** OpenAI-style `GET /v1/models` over active models (L386). */
 async function listActiveModels(): Promise<GatewayModelList> {
   const rows = await Models.find({ status: 'active' })
     .select({ slug: 1, providerId: 1, pricing: 1, createdAt: 1 })

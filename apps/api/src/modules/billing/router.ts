@@ -14,7 +14,7 @@ export function billingRouter(ctx: AppContext): Router {
   const router = Router();
   router.use(jwtAuth(ctx));
 
-  // L519: per user, so a shared NAT does not throttle unrelated wallets.
+  // L523: per user, so a shared NAT does not throttle unrelated wallets.
   const depositLimit = createRateLimit({
     limit: DEPOSIT_LIMIT_PER_MIN,
     keyGenerator: (req) => requireAuthUser(req).userId,

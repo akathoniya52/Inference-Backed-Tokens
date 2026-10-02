@@ -83,7 +83,7 @@ export async function revokeKey(userId: string, id: string): Promise<ApiKey> {
   return toDto(row);
 }
 
-/** Resolves a bearer API key (L230 step 1): unknown, revoked or orphaned → 401. */
+/** Resolves a bearer API key (L234 step 1): unknown, revoked or orphaned → 401. */
 export async function authenticateKey(ctx: AppContext, key: string): Promise<ApiKeyContext> {
   const row = await ApiKeys.findOne({ keyHash: sha256Hex(key) }).lean<ApiKeyRow>();
   if (!row || row.status !== 'active') throw new AppError('invalid_api_key');

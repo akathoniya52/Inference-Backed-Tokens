@@ -8,7 +8,7 @@ import { issueNonce, verifySignIn } from './service.js';
 
 const AUTH_LIMIT_PER_MIN = 10;
 
-// The spec body is `{wallet, signature}` (L389); `nonce` pins a specific
+// The spec body is `{wallet, signature}` (L388); `nonce` pins a specific
 // issued nonce and is optional so the shared schema stays the contract.
 const VerifyBodySchema = VerifyRequestSchema.extend({
   nonce: NonceResponseSchema.shape.nonce.max(128).optional(),

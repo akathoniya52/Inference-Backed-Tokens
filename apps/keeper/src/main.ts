@@ -4,7 +4,7 @@ import { hostname } from 'node:os';
 
 import { connectDb, disconnectDb } from '@ibt/db';
 import { solToLamports } from '@ibt/shared';
-import { createLogAlerter, createLogger } from '@ibt/shared/node';
+import { createAlerter, createLogger } from '@ibt/shared/node';
 
 import { loadEnv } from './env.js';
 import { createHealthServer } from './health-server.js';
@@ -23,7 +23,14 @@ async function main(): Promise<void> {
   const env = loadEnv();
   const logger = createLogger({ level: env.LOG_LEVEL, name: 'keeper' });
   await connectDb(env.MONGODB_URI);
-  const ctx = buildKeeperCtx(env, env.CHAIN_MODE, { logger, alerter: createLogAlerter(logger) });
+  const ctx = buildKeeperCtx(env, env.CHAIN_MODE, {
+    logger,
+    alerter: createAlerter({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      chatId: env.TELEGRAM_CHAT_ID,
+      logger,
+    }),
+  });
   logger.info(
     { cluster: env.CLUSTER, chain: env.CHAIN_MODE, keeper: ctx.keeper.publicKey.toBase58() },
     'keeper starting',

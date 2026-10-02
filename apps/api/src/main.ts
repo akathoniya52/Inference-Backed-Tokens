@@ -4,7 +4,7 @@ import type { ChainClient } from '@ibt/chain';
 import { RealChainClient, USDC_MINT } from '@ibt/chain';
 import { createFakeChain, type FakeChainTx } from '@ibt/chain/testing';
 import { connectDb, connection, disconnectDb, syncAllIndexes } from '@ibt/db';
-import { createLogAlerter, createLogger } from '@ibt/shared/node';
+import { createAlerter, createLogger } from '@ibt/shared/node';
 
 import { createApp } from './app.js';
 import { loadEnv, type ApiEnv } from './env.js';
@@ -45,7 +45,11 @@ async function main(): Promise<void> {
   const app = createApp({
     env,
     chain: buildChain(env),
-    alerter: createLogAlerter(logger),
+    alerter: createAlerter({
+      botToken: env.TELEGRAM_BOT_TOKEN,
+      chatId: env.TELEGRAM_CHAT_ID,
+      logger,
+    }),
     logger,
   });
   const server = app.listen(env.PORT, () => {

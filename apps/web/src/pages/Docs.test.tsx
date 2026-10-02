@@ -105,9 +105,9 @@ describe('DocsPage', () => {
     }
   });
 
-  it('marks streaming as coming soon and explains the 70/20/10 split', () => {
+  it('describes streaming and explains the 70/20/10 split', () => {
     renderRoute('/docs');
-    expect(screen.getByText(/Streaming is coming soon/)).toBeTruthy();
+    expect(screen.getByText(/relays the upstream server-sent events/)).toBeTruthy();
     const split = screen.getByRole('table', { name: 'Revenue split' });
     expect(within(split).getByText('70%')).toBeTruthy();
     expect(within(split).getByText('20%')).toBeTruthy();

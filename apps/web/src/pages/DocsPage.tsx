@@ -222,10 +222,17 @@ export function DocsPage() {
           </DocSection>
 
           <DocSection id="streaming" title="Streaming">
-            <p className="rounded-sm border border-accent/40 bg-accent/10 p-4 text-sm text-ink-50">
-              Streaming is coming soon. For now send requests without{' '}
-              <code className="font-mono">stream: true</code>; the full completion arrives in one
-              response with its cost in the headers.
+            <p>
+              Set <code className={INLINE_CODE}>stream: true</code> and the gateway relays the
+              upstream server-sent events as they arrive, ending with{' '}
+              <code className={INLINE_CODE}>data: [DONE]</code>. The billing headers are sent before
+              the first chunk: <code className={INLINE_CODE}>X-Cost-Usdc</code> is the amount held
+              for the request, from <code className={INLINE_CODE}>max_tokens</code>, and{' '}
+              <code className={INLINE_CODE}>X-Balance-Usdc</code> is your balance after that hold.
+              The final charge is the usage the upstream reports, never more than the hold; the rest
+              is released. A stream cut by the 300 second limit or by a closed connection is not
+              billed. With an <code className={INLINE_CODE}>Idempotency-Key</code>, a retry of a
+              finished stream returns the assembled completion as one JSON response.
             </p>
           </DocSection>
 

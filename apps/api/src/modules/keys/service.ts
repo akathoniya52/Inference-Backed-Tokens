@@ -87,8 +87,8 @@ export async function revokeKey(userId: string, id: string): Promise<ApiKey> {
 export async function authenticateKey(ctx: AppContext, key: string): Promise<ApiKeyContext> {
   const row = await ApiKeys.findOne({ keyHash: sha256Hex(key) }).lean<ApiKeyRow>();
   if (!row || row.status !== 'active') throw new AppError('invalid_api_key');
-  const userExists = await Users.exists({ _id: row.userId });
-  if (!userExists) throw new AppError('invalid_api_key');
+  const user = await Users.findById(row.userId).select({ wallet: 1 }).lean();
+  if (!user) throw new AppError('invalid_api_key');
 
   const now = ctx.clock();
   const staleBefore = new Date(now.getTime() - LAST_USED_THROTTLE_MS);
@@ -99,6 +99,7 @@ export async function authenticateKey(ctx: AppContext, key: string): Promise<Api
   return {
     apiKeyId: row._id.toHexString(),
     userId: row.userId.toHexString(),
+    wallet: user.wallet,
     dailyCapMicroUsdc: row.dailyCapMicroUsdc,
   };
 }

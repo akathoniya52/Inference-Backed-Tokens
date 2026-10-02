@@ -2,6 +2,7 @@ import { Requests, Types, capture, hold, release, type RequestRecord } from '@ib
 import {
   AppError,
   ChatCompletionResponseSchema,
+  applyDiscount,
   GATEWAY_RESPONSE_HEADERS,
   computeCostMicro,
   estimateHoldMicro,
@@ -24,6 +25,8 @@ export interface CompletionInput {
   model: ResolvedModel;
   body: ChatCompletionRequest;
   maxTokens: number;
+  /** Holder discount for this user and model, 0 or `HOLDER_DISCOUNT_BPS`. */
+  discountBps: number;
   idempotencyKey?: string;
 }
 
@@ -35,9 +38,6 @@ export interface CompletionResult {
 type UpstreamOutcome =
   | { ok: true; rawBody: string; parsed: ChatCompletionResponse; upstreamStatus: number }
   | { ok: false; status: 'upstream_error' | 'timeout'; upstreamStatus: number | null };
-
-/** `X-Discount-Bps` is always 0 until the holder discount (P4-T8). */
-const DISCOUNT_BPS = 0;
 
 /**
  * Body sent upstream: the provider's model name, and `stream_options` only on a
@@ -200,14 +200,17 @@ export async function openHold(ctx: AppContext, input: CompletionInput): Promise
     inPrice: model.pricing.inputPerMTokMicroUsdc,
     outPrice: model.pricing.outputPerMTokMicroUsdc,
   };
-  const estimate = estimateHoldMicro({
-    promptTokens: countMessages(body.messages),
-    maxTokens: input.maxTokens,
-    ...pricing,
-  });
+  const estimate = applyDiscount(
+    estimateHoldMicro({
+      promptTokens: countMessages(body.messages),
+      maxTokens: input.maxTokens,
+      ...pricing,
+    }),
+    input.discountBps,
+  );
   // `hold` needs a positive amount; a free model still reserves one micro-USDC.
   const { holdId } = await hold(key.userId, estimate > 0n ? estimate : 1n, { requestId });
-  return { holdId, estimate, pricing, discountBps: DISCOUNT_BPS };
+  return { holdId, estimate, pricing, discountBps: input.discountBps };
 }
 
 export interface UsageCount {
@@ -216,18 +219,17 @@ export interface UsageCount {
   usageEstimated: boolean;
 }
 
-/** Actual cost of the call, capped at the hold. */
+/** Actual cost of the call after the holder discount (G16, floor), capped at the hold. */
 export function billedCost(
   ctx: AppContext,
   requestId: string,
   held: OpenHold,
   usage: UsageCount,
 ): bigint {
-  const cost = computeCostMicro({
-    pt: usage.promptTokens,
-    ct: usage.completionTokens,
-    ...held.pricing,
-  });
+  const cost = applyDiscount(
+    computeCostMicro({ pt: usage.promptTokens, ct: usage.completionTokens, ...held.pricing }),
+    held.discountBps,
+  );
   // The hold is the overdraft guard (G14): never bill past it, even if the
   // upstream's tokenizer counts more prompt tokens than tiktoken did.
   const billed = cost > held.estimate ? held.estimate : cost;

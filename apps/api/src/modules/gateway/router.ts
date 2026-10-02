@@ -18,7 +18,8 @@ import { getRequestId, requireApiKeyContext } from '../../context.js';
 import { apiKeyAuth } from '../../middleware/apiKeyAuth.js';
 import { createRateLimit } from '../../middleware/rateLimit.js';
 import { parseInput } from '../../validate.js';
-import { completeChat } from './completions.js';
+import { completeChat, type CompletionInput } from './completions.js';
+import { createHolderDiscount } from './discount.js';
 import {
   abandonIdempotency,
   claimIdempotency,
@@ -97,13 +98,19 @@ export function gatewayRouter(ctx: AppContext): Router {
     res.json(await listActiveModels());
   });
 
+  const discounts = createHolderDiscount(ctx);
   router.post('/chat/completions', async (req, res) => {
     const key = requireApiKeyContext(req);
     const { body, maxTokens } = validateChatRequest(req.body);
     const idempotencyKey = idempotencyKeyOf(req);
     const requestId = getRequestId(req) ?? randomUUID();
+    const prepare = async (): Promise<CompletionInput> => {
+      const model = await resolveModel(body.model);
+      const discountBps = await discounts.bpsFor(key.wallet, model);
+      return { requestId, key, model, body, maxTokens, discountBps };
+    };
     if (idempotencyKey === undefined) {
-      const input = { requestId, key, model: await resolveModel(body.model), body, maxTokens };
+      const input = await prepare();
       if (body.stream === true) {
         await streamChat(ctx, input, res);
         return;
@@ -124,8 +131,7 @@ export function gatewayRouter(ctx: AppContext): Router {
       return;
     }
     try {
-      const model = await resolveModel(body.model);
-      const input = { requestId, key, model, body, maxTokens, idempotencyKey };
+      const input = { ...(await prepare()), idempotencyKey };
       if (body.stream === true) {
         // A streamed call is stored, and replayed, as one assembled JSON completion.
         const streamed = await streamChat(ctx, input, res);

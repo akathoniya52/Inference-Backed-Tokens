@@ -15,6 +15,8 @@ export interface AuthUser {
 export interface ApiKeyContext {
   apiKeyId: string;
   userId: string;
+  /** The key owner's wallet, for the holder discount (L186). */
+  wallet: string;
   dailyCapMicroUsdc: bigint;
 }
 

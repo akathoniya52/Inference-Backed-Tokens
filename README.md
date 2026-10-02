@@ -70,7 +70,8 @@ git clone <repo> ibt && cd ibt && corepack enable
 pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test && pnpm build
 docker build -t ibt .
 docker compose up -d mongo
-cp apps/api/.env.example apps/api/.env && cp apps/keeper/.env.example apps/keeper/.env   # localhost MONGODB_URI, CHAIN_MODE=fake, CLUSTER=devnet
+cp apps/api/.env.example apps/api/.env && cp apps/keeper/.env.example apps/keeper/.env   # localhost MONGODB_URI, CLUSTER=devnet; then made local-ready by the sed line
+K=11111111111111111111111111111111; sed -i.bak -e 's/^CHAIN_MODE=real/CHAIN_MODE=fake/' -e "s|^DBC_CONFIG=.*|DBC_CONFIG=$K|" -e "s|^TREASURY_WALLET=.*|TREASURY_WALLET=$K|" -e "s|^KEEPER_WALLET=.*|KEEPER_WALLET=$K|" -e "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -base64 32)|" -e "s|^MASTER_KEY=.*|MASTER_KEY=$(openssl rand -base64 32)|" -e "s|^ADMIN_TOKEN=.*|ADMIN_TOKEN=$(openssl rand -base64 32)|" apps/api/.env
 pnpm --filter @ibt/mock-upstream start &                      # :4010
 (cd apps/api && node --env-file=.env dist/main.js) &          # :4000; nothing loads .env implicitly
 eval "$(pnpm -s tsx --env-file=apps/api/.env scripts/dev-signin.ts --export)"   # ephemeral nacl keypair → WALLET, JWT
@@ -89,7 +90,7 @@ pnpm smoke:local    # automates all of the above → "SMOKE OK"
 
 Notes:
 
-- `apps/api/.env` does not start as copied: set `CHAIN_MODE=fake`, the `replace-me` secrets `JWT_SECRET`, `MASTER_KEY` and `ADMIN_TOKEN` (`openssl rand -base64 32` each), and `DBC_CONFIG`, `TREASURY_WALLET` and `KEEPER_WALLET` to any base58 public key (e.g. `11111111111111111111111111111111`). `apps/keeper/.env` runs `settle:once --chain fake` as copied (in fake mode an unparseable keeper or treasury key becomes a throwaway keypair); for the long-running keeper also set `CHAIN_MODE=fake` and the api's `ADMIN_TOKEN`. `CHAIN_MODE=fake` and the `seed-models` flags `--dev-credit` / `--fake-token` refuse `CLUSTER=mainnet-beta` and any `MONGODB_URI` host other than `localhost` / `127.0.0.1`.
+- `apps/api/.env` does not start as copied (the `sed` line above fixes it): set `CHAIN_MODE=fake`, the `replace-me` secrets `JWT_SECRET`, `MASTER_KEY` and `ADMIN_TOKEN` (`openssl rand -base64 32` each), and `DBC_CONFIG`, `TREASURY_WALLET` and `KEEPER_WALLET` to any base58 public key (e.g. `11111111111111111111111111111111`). `apps/keeper/.env` runs `settle:once --chain fake` as copied (in fake mode an unparseable keeper or treasury key becomes a throwaway keypair); for the long-running keeper also set `CHAIN_MODE=fake` and the api's `ADMIN_TOKEN`. `CHAIN_MODE=fake` and the `seed-models` flags `--dev-credit` / `--fake-token` refuse `CLUSTER=mainnet-beta` and any `MONGODB_URI` host other than `localhost` / `127.0.0.1`.
 - `seed-models.ts` upserts the `mock-llm` model (upstream `http://localhost:${MOCK_UPSTREAM_PORT}/v1`, key `mock-key` encrypted with `MASTER_KEY`). `--fake-token` puts the model on the curve with a fake mint and stores the pool in `fakeChainPools` and a SOL price in `fakeChainPrices` so a `CHAIN_MODE=fake` process on the same Mongo can read them. `--dev-credit <wallet> <usdc>` writes an `adjust` ledger row with reason `dev_credit`.
 - `dev-signin.ts` signs the api's sign-in message with an in-memory keypair and prints `{wallet, jwt}` (or `export WALLET=… JWT=…` with `--export`); `API_URL` defaults to `http://localhost:4000`.
 - `pnpm dev` runs every app in watch mode (`tsx watch` for api, keeper and mock; `vite` for web on :5173).

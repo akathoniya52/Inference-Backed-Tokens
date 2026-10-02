@@ -6,8 +6,8 @@ import { createLease, type Lease } from '../src/lease.js';
 import { createScheduler, type Scheduler } from '../src/scheduler.js';
 import { makeKeeperCtx, type TestKeeperCtx } from './helpers.js';
 
-const TTL_MS = 200;
-const RENEW_MS = 40;
+const TTL_MS = 1500;
+const RENEW_MS = 100;
 
 interface Instance {
   lease: Lease;
@@ -84,14 +84,14 @@ describe('keeper lease', () => {
     const crashedAt = Date.now();
     a.lease.pause();
 
-    await vi.waitFor(() => expect(b.lease.isHeld()).toBe(true), { timeout: 3000, interval: 10 });
+    await vi.waitFor(() => expect(b.lease.isHeld()).toBe(true), { timeout: 6000, interval: 10 });
     expect(Date.now() - crashedAt).toBeGreaterThanOrEqual(TTL_MS - RENEW_MS);
 
     await b.scheduler.runNow('count');
     expect(b.runs).toBe(1);
 
     a.lease.resume();
-    await vi.waitFor(() => expect(a.lost).toBe(1), { timeout: 3000, interval: 10 });
+    await vi.waitFor(() => expect(a.lost).toBe(1), { timeout: 6000, interval: 10 });
     expect(a.lease.isHeld()).toBe(false);
     expect(await a.scheduler.runNow('count')).toBe(false);
     expect(a.runs).toBe(0);

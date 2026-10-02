@@ -5,13 +5,13 @@ import {
   SwapMode as DammSwapMode,
 } from '@meteora-ag/cp-amm-sdk';
 import {
-  convertToLamports,
   DynamicBondingCurveClient,
   getCurrentPoint,
   SwapMode,
 } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import { SOL_DECIMALS, TOKEN_DECIMALS, WSOL_MINT } from '@ibt/shared';
 import { PublicKey, type Connection, type Transaction } from '@solana/web3.js';
+import BN from 'bn.js';
 
 // Browser-side quotes and swap builders (spec L122–123, L492). Curve phase
 // goes through the DBC SDK, graduated tokens through cp-amm (DAMM v2).
@@ -46,8 +46,8 @@ export function outputDecimals(side: TradeSide): number {
   return side === 'buy' ? TOKEN_DECIMALS : SOL_DECIMALS;
 }
 
-/** bn.js is not a direct dependency; the SDK builds a BN from an integer string. */
-const toBN = (value: bigint) => convertToLamports(value.toString(), 0);
+/** Exact; the SDKs' `convertToLamports` rounds to 20 significant digits. */
+const toBN = (value: bigint) => new BN(value.toString());
 const big = (value: { toString(): string }): bigint => BigInt(value.toString());
 
 const IMPACT_SCALE = 1_000_000n;

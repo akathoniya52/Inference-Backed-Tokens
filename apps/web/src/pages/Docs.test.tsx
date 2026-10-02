@@ -1,14 +1,54 @@
-import { fireEvent, screen, within } from '@testing-library/react';
+import { act, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { renderRoute } from '../test-utils';
 
 afterEach(() => {
   vi.restoreAllMocks();
+  Object.defineProperty(window, 'scrollY', { value: 0, configurable: true });
 });
 
 function codeBlock(title: string): HTMLElement {
   return screen.getByRole('figure', { name: title });
+}
+
+function tocLink(name: string): HTMLElement {
+  return within(screen.getByRole('navigation', { name: 'On this page' })).getByRole('link', {
+    name,
+  });
+}
+
+function current(name: string): string | null {
+  return tocLink(name).getAttribute('aria-current');
+}
+
+const SECTION_IDS = ['quickstart', 'sdk', 'curl', 'streaming', 'headers', 'errors', 'revenue'];
+const VIEWPORT_HEIGHT = 1000;
+const READING_LINE_Y = VIEWPORT_HEIGHT * 0.2;
+const PAGE_HEIGHT = 5000;
+const OFFSCREEN_BELOW = PAGE_HEIGHT;
+
+function setScrollGeometry({ scrollY, atBottom }: { scrollY: number; atBottom: boolean }) {
+  Object.defineProperty(window, 'innerHeight', { value: VIEWPORT_HEIGHT, configurable: true });
+  Object.defineProperty(window, 'scrollY', { value: scrollY, configurable: true });
+  Object.defineProperty(document.documentElement, 'scrollHeight', {
+    value: atBottom ? scrollY + VIEWPORT_HEIGHT : PAGE_HEIGHT,
+    configurable: true,
+  });
+}
+
+function scrollPage(sectionTops: Record<string, number>, { atBottom = false } = {}) {
+  setScrollGeometry({ scrollY: 500, atBottom });
+  for (const id of SECTION_IDS) {
+    const section = document.getElementById(id);
+    if (section === null) throw new Error(`no section #${id}`);
+    vi.spyOn(section, 'getBoundingClientRect').mockReturnValue({
+      top: sectionTops[id] ?? OFFSCREEN_BELOW,
+    } as DOMRect);
+  }
+  act(() => {
+    window.dispatchEvent(new Event('scroll'));
+  });
 }
 
 describe('DocsPage', () => {
@@ -83,5 +123,68 @@ describe('DocsPage', () => {
       expect.stringContaining('http://api.test/v1/chat/completions'),
     );
     expect(await within(codeBlock('curl')).findByRole('button', { name: 'Copied' })).toBeTruthy();
+  });
+
+  describe('on this page', () => {
+    it('highlights the first section until the hash or the scroll position says otherwise', () => {
+      renderRoute('/docs');
+      expect(current('Quickstart')).toBe('location');
+      expect(tocLink('Quickstart').className).toContain('border-accent');
+      expect(current('Errors')).toBeNull();
+      expect(tocLink('Errors').className).toContain('border-transparent');
+    });
+
+    it('highlights the section named by the URL hash', () => {
+      renderRoute('/docs#errors');
+      expect(current('Errors')).toBe('location');
+      expect(current('Quickstart')).toBeNull();
+    });
+
+    it('follows the last section whose top has passed the reading line', () => {
+      const { unmount } = renderRoute('/docs');
+      scrollPage({
+        quickstart: READING_LINE_Y - 1100,
+        sdk: READING_LINE_Y - 600,
+        curl: READING_LINE_Y - 50,
+        streaming: READING_LINE_Y + 400,
+      });
+      expect(current('curl')).toBe('location');
+      expect(current('Quickstart')).toBeNull();
+      expect(current('Streaming')).toBeNull();
+
+      const remove = vi.spyOn(window, 'removeEventListener');
+      unmount();
+      expect(remove).toHaveBeenCalledWith('scroll', expect.any(Function));
+    });
+
+    it('returns to the first section when the page is scrolled above it', () => {
+      renderRoute('/docs');
+      scrollPage({ errors: READING_LINE_Y - 300 });
+      expect(current('Errors')).toBe('location');
+
+      scrollPage({ quickstart: READING_LINE_Y + 100 });
+      expect(current('Quickstart')).toBe('location');
+      expect(current('Errors')).toBeNull();
+    });
+
+    it('highlights the last section at the bottom of the page even if it never reaches the line', () => {
+      renderRoute('/docs');
+      scrollPage(
+        { errors: READING_LINE_Y - 150, revenue: READING_LINE_Y + 300 },
+        { atBottom: true },
+      );
+      expect(current('Where the money goes')).toBe('location');
+      expect(current('Errors')).toBeNull();
+    });
+
+    it('reads the scroll position on mount when the page is already scrolled', () => {
+      setScrollGeometry({ scrollY: 500, atBottom: false });
+      vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+        top: READING_LINE_Y - 250,
+      } as DOMRect);
+      renderRoute('/docs');
+      expect(current('Where the money goes')).toBe('location');
+      expect(current('Quickstart')).toBeNull();
+    });
   });
 });

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 
 import { CodeBlock } from '../components/CodeBlock';
 import { env } from '../env';
+import { useActiveSection } from '../hooks/useActiveSection';
 
 const API_URL = env.VITE_API_URL.replace(/\/+$/, '');
 const BASE_URL = `${API_URL}/v1`;
@@ -100,6 +101,8 @@ const SECTIONS = [
   ['errors', 'Errors'],
   ['revenue', 'Where the money goes'],
 ] as const;
+// Module-level so its identity is stable: `useActiveSection` re-observes when it changes.
+const SECTION_IDS: readonly string[] = SECTIONS.map(([id]) => id);
 
 const TABLE = 'w-full text-left text-sm';
 const TH = 'px-4 py-3 font-mono text-xs font-normal uppercase tracking-label text-ink-400';
@@ -126,6 +129,7 @@ function TableFrame({ children }: { children: ReactNode }) {
 }
 
 export function DocsPage() {
+  const activeSection = useActiveSection(SECTION_IDS);
   return (
     <section>
       <h1 className="page-title">API quickstart</h1>
@@ -136,16 +140,22 @@ export function DocsPage() {
       <div className="mt-10 grid gap-12 lg:grid-cols-4">
         <nav aria-label="On this page" className="hidden lg:block">
           <ul className="sticky top-24 space-y-2 border-l border-ink-800 font-mono text-xs uppercase tracking-label">
-            {SECTIONS.map(([id, label]) => (
-              <li key={id}>
-                <a
-                  href={`#${id}`}
-                  className="-ml-px block border-l border-transparent pl-4 text-ink-400 transition-colors hover:border-accent hover:text-ink-50"
-                >
-                  {label}
-                </a>
-              </li>
-            ))}
+            {SECTIONS.map(([id, label]) => {
+              const isActive = id === activeSection;
+              return (
+                <li key={id}>
+                  <a
+                    href={`#${id}`}
+                    aria-current={isActive ? 'location' : undefined}
+                    className={`-ml-px block border-l pl-4 transition-colors hover:border-accent hover:text-ink-50 ${
+                      isActive ? 'border-accent text-ink-50' : 'border-transparent text-ink-400'
+                    }`}
+                  >
+                    {label}
+                  </a>
+                </li>
+              );
+            })}
           </ul>
         </nav>
 

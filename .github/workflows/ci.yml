@@ -42,10 +42,10 @@ jobs:
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-${{ runner.os }}-
 
-      - name: Cache MongoDB binaries (mongodb-memory-server)
+      - name: Cache MongoDB binaries (mongodb-memory-server downloads lazily on first test run)
         uses: actions/cache@v4
         with:
-          path: node_modules/.cache/mongodb-memory-server
+          path: ~/.cache/mongodb-binaries
           key: mongoms-${{ runner.os }}-${{ env.MONGOMS_VERSION }}
 
       - run: corepack pnpm install --frozen-lockfile

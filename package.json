@@ -31,7 +31,8 @@
   },
   "config": {
     "mongodbMemoryServer": {
-      "version": "7.0.14"
+      "version": "7.0.14",
+      "disablePostinstall": "1"
     }
   }
 }

@@ -105,6 +105,75 @@ describe('WalletGate', () => {
     expect(document.cookie).toBe('');
   });
 
+  it('prefers the wallet standard signIn and verifies with its signature', async () => {
+    const signMessage = vi.fn((_bytes: Uint8Array) => Promise.resolve(signatureBytes));
+    const signIn = vi.fn(() =>
+      Promise.resolve({
+        account: { address: wallet, publicKey: owner.toBytes(), chains: [], features: [] },
+        signedMessage: new TextEncoder().encode(message()),
+        signature: signatureBytes,
+      }),
+    );
+    useWalletMock.mockReturnValue(
+      walletState({ publicKey: owner, connected: true, signMessage, signIn }),
+    );
+    fetchMock.mockResolvedValueOnce(json(200, { nonce, message: message() })).mockResolvedValueOnce(
+      json(200, {
+        token: 'jwt-abc',
+        user: { id: '66f1a2b3c4d5e6f7a8b9c0d1', wallet, role: 'consumer' },
+      }),
+    );
+
+    renderGate();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with wallet' }));
+
+    expect(await screen.findByText('secret dashboard')).toBeTruthy();
+    expect(signIn).toHaveBeenCalledWith({
+      domain: 'ibt.test',
+      address: wallet,
+      nonce,
+      issuedAt: '2026-10-02T10:00:00.000Z',
+    });
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(sentBody(1)).toEqual({ wallet, nonce, signature: bs58.encode(signatureBytes) });
+  });
+
+  it('refuses a signIn whose signed text is not the template', async () => {
+    const signIn = vi.fn(() =>
+      Promise.resolve({
+        account: { address: wallet, publicKey: owner.toBytes(), chains: [], features: [] },
+        signedMessage: new TextEncoder().encode(`${message()}\nVersion: 1`),
+        signature: signatureBytes,
+      }),
+    );
+    useWalletMock.mockReturnValue(walletState({ publicKey: owner, connected: true, signIn }));
+    fetchMock.mockResolvedValueOnce(json(200, { nonce, message: message() }));
+
+    renderGate();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with wallet' }));
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/changed the sign-in message/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getToken()).toBeNull();
+  });
+
+  it('shows the wallet error when it refuses to sign', async () => {
+    const refused = Object.assign(
+      new Error("The app's signature request cannot be shown due to invalid formatting."),
+      { name: 'WalletSignMessageError' },
+    );
+    const signMessage = vi.fn(() => Promise.reject(refused));
+    useWalletMock.mockReturnValue(walletState({ publicKey: owner, connected: true, signMessage }));
+    fetchMock.mockResolvedValueOnce(json(200, { nonce, message: message() }));
+
+    renderGate();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with wallet' }));
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(
+      /refused the sign-in request: The app's signature request/,
+    );
+  });
+
   it('shows a plain error when the wallet rejects the signature', async () => {
     const signMessage = vi.fn(() => Promise.reject(new Error('User rejected the request.')));
     useWalletMock.mockReturnValue(walletState({ publicKey: owner, connected: true, signMessage }));

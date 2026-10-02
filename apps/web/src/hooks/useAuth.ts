@@ -34,14 +34,69 @@ export function useSessionWalletSync(): void {
 const SIGN_IN_MESSAGE =
   /^(.+) wants you to sign in with your Solana account:\n.+\n\nNonce: .+\nIssued At: (.+)$/;
 
+/** The template's variable parts, in the shape the Wallet Standard `signIn` takes. */
+interface SignInFields {
+  domain: string;
+  address: string;
+  nonce: string;
+  issuedAt: string;
+}
+
 /**
  * Refuses to sign anything but the G22 template for this wallet and nonce, so
  * a compromised API cannot make the wallet sign arbitrary text.
  */
-function isExpectedMessage(message: string, wallet: string, nonce: string): boolean {
+function expectedMessageFields(
+  message: string,
+  wallet: string,
+  nonce: string,
+): SignInFields | null {
   const match = SIGN_IN_MESSAGE.exec(message);
-  if (!match?.[1] || !match[2]) return false;
-  return buildSignInMessage({ domain: match[1], wallet, nonce, issuedAt: match[2] }) === message;
+  if (!match?.[1] || !match[2]) return null;
+  const fields = { domain: match[1], address: wallet, nonce, issuedAt: match[2] };
+  const expected = buildSignInMessage({
+    domain: fields.domain,
+    wallet,
+    nonce,
+    issuedAt: fields.issuedAt,
+  });
+  return expected === message ? fields : null;
+}
+
+type WalletSignIn = NonNullable<ReturnType<typeof useWallet>['signIn']>;
+type WalletSignMessage = NonNullable<ReturnType<typeof useWallet>['signMessage']>;
+type Signer = (fields: SignInFields, message: string) => Promise<Uint8Array>;
+
+/**
+ * Wallet Standard sign-in: the wallet builds the Sign-In-With-Solana text from the
+ * fields itself. Phantom refused the very same text through `signMessage` as
+ * "invalid formatting" (2026-10-02). The api verifies our template, so the wallet
+ * must have signed exactly that.
+ */
+async function signInWithWallet(
+  signIn: WalletSignIn,
+  fields: SignInFields,
+  message: string,
+): Promise<Uint8Array> {
+  const output = await signIn(fields);
+  if (output.account.address !== fields.address) {
+    throw new SignInError(
+      'The wallet signed in with a different account. Connect that account and try again.',
+    );
+  }
+  if (new TextDecoder().decode(output.signedMessage) !== message) {
+    throw new SignInError('The wallet changed the sign-in message.');
+  }
+  return output.signature;
+}
+
+function pickSigner(
+  signIn: WalletSignIn | undefined,
+  signMessage: WalletSignMessage | undefined,
+): Signer | null {
+  if (signIn) return (fields, message) => signInWithWallet(signIn, fields, message);
+  if (signMessage) return (_fields, message) => signMessage(new TextEncoder().encode(message));
+  return null;
 }
 
 export type SignInStatus = 'idle' | 'requesting' | 'signing' | 'verifying' | 'error';
@@ -54,6 +109,9 @@ function signInErrorMessage(error: unknown): string {
   if (error instanceof Error && /reject|denied|declined|cancel/i.test(error.message)) {
     return 'You declined the sign-in request in your wallet.';
   }
+  if (error instanceof Error && error.name.startsWith('WalletSign')) {
+    return `Your wallet refused the sign-in request: ${error.message}`;
+  }
   return 'Sign-in failed. Please try again.';
 }
 
@@ -65,7 +123,7 @@ export interface UseSignIn {
 
 /** nonce → `signMessage` → verify → in-memory JWT (spec L490, P3-T3). */
 export function useSignIn(): UseSignIn {
-  const { publicKey, signMessage } = useWallet();
+  const { publicKey, signMessage, signIn: walletSignIn } = useWallet();
   const [status, setStatus] = useState<SignInStatus>('idle');
   const [error, setError] = useState<string | null>(null);
 
@@ -73,7 +131,8 @@ export function useSignIn(): UseSignIn {
     setError(null);
     try {
       if (!publicKey) throw new SignInError('Connect a wallet first.');
-      if (!signMessage) throw new SignInError('This wallet cannot sign messages.');
+      const signer = pickSigner(walletSignIn, signMessage);
+      if (!signer) throw new SignInError('This wallet cannot sign messages.');
       const wallet = publicKey.toBase58();
 
       setStatus('requesting');
@@ -81,12 +140,11 @@ export function useSignIn(): UseSignIn {
       const { nonce, message } = NonceResponseSchema.parse(
         await apiFetch('/api/auth/nonce', { method: 'POST', body: JSON.stringify(nonceBody) }),
       );
-      if (!isExpectedMessage(message, wallet, nonce)) {
-        throw new SignInError('The sign-in message from the server was not recognised.');
-      }
+      const fields = expectedMessageFields(message, wallet, nonce);
+      if (!fields) throw new SignInError('The sign-in message from the server was not recognised.');
 
       setStatus('signing');
-      const signature = await signMessage(new TextEncoder().encode(message));
+      const signature = await signer(fields, message);
 
       setStatus('verifying');
       const verifyBody: VerifyRequest & { nonce: string } = {
@@ -105,7 +163,7 @@ export function useSignIn(): UseSignIn {
       setStatus('error');
       return false;
     }
-  }, [publicKey, signMessage]);
+  }, [publicKey, signMessage, walletSignIn]);
 
   return { signIn, status, error };
 }

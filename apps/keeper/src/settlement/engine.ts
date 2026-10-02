@@ -37,7 +37,11 @@ export function isRetryable(err: unknown): boolean {
   return err instanceof Error && TRANSIENT_MESSAGE.test(err.message);
 }
 
-const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+/** Includes the cause chain: `chain_send_failed` alone hides the program error behind it. */
+const errorMessage = (err: unknown): string => {
+  if (!(err instanceof Error)) return String(err);
+  return err.cause instanceof Error ? `${err.message}: ${errorMessage(err.cause)}` : err.message;
+};
 
 async function reload(settlement: SettlementDoc): Promise<SettlementDoc> {
   const fresh = await Settlements.findById(settlement._id);

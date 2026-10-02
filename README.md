@@ -95,7 +95,7 @@ Notes:
 - `dev-signin.ts` signs the api's sign-in message with an in-memory keypair and prints `{wallet, jwt}` (or `export WALLET=… JWT=…` with `--export`); `API_URL` defaults to `http://localhost:4000`.
 - `pnpm dev` runs every app in watch mode (`tsx watch` for api, keeper and mock; `vite` for web on :5173), but nothing passes the `.env` files to it, so the api and keeper exit at startup listing their missing keys. For a dev run start those two from their own directories: `cd apps/api && pnpm exec tsx watch --conditions=development --env-file=.env src/main.ts` (same in `apps/keeper`), with `pnpm --filter @ibt/mock-upstream dev` and `pnpm --filter @ibt/web dev` beside them (vite reads `apps/web/.env` itself). Under pnpm 12, running the same `tsx watch … --env-file=.env` through `exec` with a `--filter` does not find the file; use `cd`.
 - Web e2e: `pnpm --filter @ibt/web e2e` (Playwright, stubbed api; the `@staging` wallet flow runs only with `STAGING_URL`).
-- Devnet end-to-end: `DEVNET_E2E=1 pnpm --filter @ibt/scripts devnet-e2e` (operator only, H6; prints `skipped` without the flag and refuses mainnet-beta). It needs `apps/keeper/.env` to exist, a local Mongo (`MONGODB_URI`, isolated into a fresh `ibt_devnet_e2e_*` database) and devnet airdrops.
+- Devnet end-to-end: `DEVNET_E2E=1 pnpm --filter @ibt/scripts devnet-e2e` (operator only, H6; prints `skipped` without the flag and refuses mainnet-beta). It needs `apps/keeper/.env` to exist, a local Mongo (`MONGODB_URI`, isolated into a fresh `ibt_devnet_e2e_*` database) and 5 devnet SOL for its throwaway wallets. By default the public faucet airdrops them in 2 SOL requests (`AIRDROP_RPC_URL`, default `https://api.devnet.solana.com`; Helius devnet answers `requestAirdrop` with HTTP 500, so `RPC_URL` is never used for airdrops). When the faucet is dry for the day, fund a wallet at <https://faucet.solana.com> and pass it as `DEVNET_FUNDER_SECRET_KEY`; the run then funds its wallets by transfer.
 
 CI (`.github/workflows/ci.yml`) runs install, lint, format check, typecheck, tests, build and the Playwright smoke on every push and pull request, plus a `docker` job (`docker build` and `--version-check`). The nightly job runs `scripts/devnet-e2e.ts` only when the `DEVNET_RPC_URL` secret is set.
 
@@ -103,51 +103,53 @@ CI (`.github/workflows/ci.yml`) runs install, lint, format check, typecheck, tes
 
 Every app parses its env at startup and fails with the offending key names (values are never printed). Nothing loads `.env` implicitly; use `node --env-file` or `tsx --env-file`.
 
-| Variable                  | Used by                         | Notes                                                                                                         |
-| ------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `CLUSTER`                 | api, keeper, scripts            | `devnet` or `mainnet-beta`                                                                                    |
-| `RPC_URL`                 | api, keeper, scripts            | Helius URL with key (H2)                                                                                      |
-| `RPC_URL_FALLBACK`        | api, keeper                     | Public RPC fallback                                                                                           |
-| `CHAIN_MODE`              | api, keeper                     | `real` or `fake` (in-memory chain; local Mongo and non-mainnet only)                                          |
-| `USDC_MINT`               | api, keeper                     | Devnet `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`, mainnet `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` |
-| `DBC_CONFIG`              | api, keeper, scripts            | Partner config key printed by `scripts/create-config.ts`                                                      |
-| `DAMM_V2_FEE_CONFIG`      | keeper                          | `Hv8Lmzmnju6m7kcokVKvwqz7QPmdX9XfKjJsXz8RXcjp`                                                                |
-| `TREASURY_WALLET`         | api, keeper, scripts            | Public key; fee claimer and USDC holder                                                                       |
-| `KEEPER_WALLET`           | api, scripts                    | Public key; shown on the float report, target of `refill-float`                                               |
-| `TREASURY_SECRET_KEY`     | keeper, scripts (`--send` only) | Base58 or JSON byte array; never set for the api                                                              |
-| `KEEPER_SECRET_KEY`       | keeper                          | SOL float, buys, locks, migration cranks; never set for the api                                               |
-| `MONGODB_URI`             | api, keeper, scripts            | Replica set required (transactions)                                                                           |
-| `JWT_SECRET`              | api                             | ≥ 32 chars                                                                                                    |
-| `MASTER_KEY`              | api, scripts (`seed-models`)    | 32 bytes, hex or base64; encrypts upstream API keys                                                           |
-| `ADMIN_TOKEN`             | api, keeper                     | Same value in both; admin endpoints                                                                           |
-| `PORT`                    | api                             | Default `4000`                                                                                                |
-| `WEB_ORIGIN`              | api                             | CORS origin and sign-in domain                                                                                |
-| `TRUST_PROXY`             | api                             | Express `trust proxy`, default `1`                                                                            |
-| `ADMIN_IP_ALLOWLIST`      | api                             | Comma-separated                                                                                               |
-| `RATE_LIMIT_PER_MIN`      | api                             | Per-key gateway rate limit override (default 60)                                                              |
-| `DAILY_CAP_USDC`          | api                             | Default daily spend cap per API key (default 50)                                                              |
-| `JUPITER_PRICE_URL`       | api, keeper                     | SOL price endpoint, e.g. `https://lite-api.jup.ag/price/v3`                                                   |
-| `JUPITER_API_KEY`         | api, keeper                     | Optional                                                                                                      |
-| `MOCK_UPSTREAM_PORT`      | api, mock-upstream, scripts     | Default `4010`                                                                                                |
-| `TELEGRAM_BOT_TOKEN`      | api, keeper                     | Optional; with `TELEGRAM_CHAT_ID` set, alerts are sent to Telegram as well as logged                          |
-| `TELEGRAM_CHAT_ID`        | api, keeper                     | Optional, as above; leave both unset to log alerts only                                                       |
-| `SETTLEMENT_CRON`         | keeper                          | Default `5 * * * *`                                                                                           |
-| `RECONCILE_CRON`          | keeper                          | Daily reconciliation schedule, `0 3 * * *`                                                                    |
-| `MAX_SLICE_SOL_PER_RUN`   | keeper                          | Default `2`                                                                                                   |
-| `MAX_PAYOUT_USDC_PER_RUN` | keeper                          | Default `500`                                                                                                 |
-| `FLOAT_MIN_SOL`           | api, keeper, scripts            | Default `0.5`; the api float report and the keeper float monitor both compare against it                      |
-| `API_INTERNAL_URL`        | keeper                          | Api base URL for the health-check trigger                                                                     |
-| `KEEPER_PORT`             | keeper                          | `/healthz`, default `4001`                                                                                    |
-| `DEVNET_E2E`              | keeper, scripts                 | `1` enables `scripts/devnet-e2e.ts`                                                                           |
-| `LOG_LEVEL`               | api, keeper                     | Default `info`                                                                                                |
-| `VITE_API_URL`            | web                             | Must be the production api domain before a mainnet launch (H10)                                               |
-| `VITE_RPC_URL`            | web                             |                                                                                                               |
-| `VITE_CLUSTER`            | web                             |                                                                                                               |
-| `VITE_DBC_CONFIG`         | web                             | Same key as `DBC_CONFIG`                                                                                      |
-| `VITE_USDC_MINT`          | web                             |                                                                                                               |
-| `VITE_TREASURY_USDC_ATA`  | web                             | Treasury USDC token account (H4)                                                                              |
-| `API_URL`                 | scripts (`dev-signin`)          | Default `http://localhost:4000`                                                                               |
-| `I_AM_HUMAN`              | scripts                         | `1` unlocks `--send`; set only in an operator shell                                                           |
+| Variable                   | Used by                         | Notes                                                                                                                                  |
+| -------------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `CLUSTER`                  | api, keeper, scripts            | `devnet` or `mainnet-beta`                                                                                                             |
+| `RPC_URL`                  | api, keeper, scripts            | Helius URL with key (H2)                                                                                                               |
+| `RPC_URL_FALLBACK`         | api, keeper                     | Public RPC fallback                                                                                                                    |
+| `CHAIN_MODE`               | api, keeper                     | `real` or `fake` (in-memory chain; local Mongo and non-mainnet only)                                                                   |
+| `USDC_MINT`                | api, keeper                     | Devnet `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`, mainnet `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`                          |
+| `DBC_CONFIG`               | api, keeper, scripts            | Partner config key printed by `scripts/create-config.ts`                                                                               |
+| `DAMM_V2_FEE_CONFIG`       | keeper                          | `Hv8Lmzmnju6m7kcokVKvwqz7QPmdX9XfKjJsXz8RXcjp`                                                                                         |
+| `TREASURY_WALLET`          | api, keeper, scripts            | Public key; fee claimer and USDC holder                                                                                                |
+| `KEEPER_WALLET`            | api, scripts                    | Public key; shown on the float report, target of `refill-float`                                                                        |
+| `TREASURY_SECRET_KEY`      | keeper, scripts (`--send` only) | The 64-byte secret key: base58 as Phantom and Solflare export it, or the JSON byte array `solana-keygen` writes; never set for the api |
+| `KEEPER_SECRET_KEY`        | keeper                          | Same format as `TREASURY_SECRET_KEY`; SOL float, buys, locks, migration cranks; never set for the api                                  |
+| `MONGODB_URI`              | api, keeper, scripts            | Replica set required (transactions)                                                                                                    |
+| `JWT_SECRET`               | api                             | ≥ 32 chars                                                                                                                             |
+| `MASTER_KEY`               | api, scripts (`seed-models`)    | 32 bytes, hex or base64; encrypts upstream API keys                                                                                    |
+| `ADMIN_TOKEN`              | api, keeper                     | Same value in both; admin endpoints                                                                                                    |
+| `PORT`                     | api                             | Default `4000`                                                                                                                         |
+| `WEB_ORIGIN`               | api                             | CORS origin and sign-in domain                                                                                                         |
+| `TRUST_PROXY`              | api                             | Express `trust proxy`, default `1`                                                                                                     |
+| `ADMIN_IP_ALLOWLIST`       | api                             | Comma-separated                                                                                                                        |
+| `RATE_LIMIT_PER_MIN`       | api                             | Per-key gateway rate limit override (default 60)                                                                                       |
+| `DAILY_CAP_USDC`           | api                             | Default daily spend cap per API key (default 50)                                                                                       |
+| `JUPITER_PRICE_URL`        | api, keeper                     | SOL price endpoint, e.g. `https://lite-api.jup.ag/price/v3`                                                                            |
+| `JUPITER_API_KEY`          | api, keeper                     | Optional                                                                                                                               |
+| `MOCK_UPSTREAM_PORT`       | api, mock-upstream, scripts     | Default `4010`                                                                                                                         |
+| `TELEGRAM_BOT_TOKEN`       | api, keeper                     | Optional; with `TELEGRAM_CHAT_ID` set, alerts are sent to Telegram as well as logged                                                   |
+| `TELEGRAM_CHAT_ID`         | api, keeper                     | Optional, as above; leave both unset to log alerts only                                                                                |
+| `SETTLEMENT_CRON`          | keeper                          | Default `5 * * * *`                                                                                                                    |
+| `RECONCILE_CRON`           | keeper                          | Daily reconciliation schedule, `0 3 * * *`                                                                                             |
+| `MAX_SLICE_SOL_PER_RUN`    | keeper                          | Default `2`                                                                                                                            |
+| `MAX_PAYOUT_USDC_PER_RUN`  | keeper                          | Default `500`                                                                                                                          |
+| `FLOAT_MIN_SOL`            | api, keeper, scripts            | Default `0.5`; the api float report and the keeper float monitor both compare against it                                               |
+| `API_INTERNAL_URL`         | keeper                          | Api base URL for the health-check trigger                                                                                              |
+| `KEEPER_PORT`              | keeper                          | `/healthz`, default `4001`                                                                                                             |
+| `DEVNET_E2E`               | keeper, scripts                 | `1` enables `scripts/devnet-e2e.ts`                                                                                                    |
+| `LOG_LEVEL`                | api, keeper                     | Default `info`                                                                                                                         |
+| `VITE_API_URL`             | web                             | Must be the production api domain before a mainnet launch (H10)                                                                        |
+| `VITE_RPC_URL`             | web                             |                                                                                                                                        |
+| `VITE_CLUSTER`             | web                             |                                                                                                                                        |
+| `VITE_DBC_CONFIG`          | web                             | Same key as `DBC_CONFIG`                                                                                                               |
+| `VITE_USDC_MINT`           | web                             |                                                                                                                                        |
+| `VITE_TREASURY_USDC_ATA`   | web                             | Treasury USDC token account (H4)                                                                                                       |
+| `API_URL`                  | scripts (`dev-signin`)          | Default `http://localhost:4000`                                                                                                        |
+| `I_AM_HUMAN`               | scripts                         | `1` unlocks `--send`; set only in an operator shell                                                                                    |
+| `DEVNET_FUNDER_SECRET_KEY` | scripts                         | Optional for `devnet-e2e`: a devnet wallet holding 5 SOL funds the run's throwaway wallets by transfer instead of faucet airdrops      |
+| `AIRDROP_RPC_URL`          | scripts                         | Optional for `devnet-e2e`: RPC used only for `requestAirdrop` (default `https://api.devnet.solana.com`)                                |
 
 ## Runbooks
 

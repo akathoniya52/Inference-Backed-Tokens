@@ -1,6 +1,11 @@
 // Devnet end-to-end run (work plan P8-T4, Plan.md L590, operator task H6). Skipped unless
 // DEVNET_E2E=1. Every keypair is generated in memory for this run and never written anywhere;
 // the keeper child receives its two keys through its environment only.
+//
+// Airdrops never use RPC_URL: Helius devnet answers requestAirdrop with HTTP 500. They go to
+// AIRDROP_RPC_URL (default api.devnet.solana.com), whose faucet has a daily limit per IP; when it
+// is dry, a wallet funded at https://faucet.solana.com and passed as DEVNET_FUNDER_SECRET_KEY funds
+// the throwaway wallets by transfer instead.
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -31,15 +36,23 @@ import {
 import { DAMM_V2_FEE_CONFIG, lamportsToSol } from '@ibt/shared';
 import { generateDepositRef } from '@ibt/shared/node';
 import {
-  type Connection,
+  Connection,
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
-  type Transaction,
+  SystemProgram,
+  Transaction,
 } from '@solana/web3.js';
 import bs58 from 'bs58';
 
-import { CliError, EXIT_ERROR, EXIT_OK, EXIT_REFUSED, runMain } from './lib/cli.js';
+import {
+  CliError,
+  EXIT_ERROR,
+  EXIT_OK,
+  EXIT_REFUSED,
+  readSecretKeypair,
+  runMain,
+} from './lib/cli.js';
 
 const DEVNET_PUBLIC_RPC = 'https://api.devnet.solana.com';
 const DEFAULT_MONGODB_URI = 'mongodb://localhost:27017/ibt?replicaSet=rs0&directConnection=true';
@@ -51,12 +64,18 @@ const SLIPPAGE_BPS = 500;
 const E2E_SPLITS = { providerBps: 1000, liquidityBps: 8000, platformBps: 1000 };
 const REVENUE_PER_RUN_MICRO = 1_000_000n;
 const SMALL_BUY_LAMPORTS = 20_000_000n;
-const AIRDROPS: readonly { who: 'treasury' | 'creator' | 'trader' | 'keeper'; sol: number }[] = [
+type Wallet = 'treasury' | 'creator' | 'trader' | 'keeper';
+/** Config rent, pool rent, the buys up to the 1 SOL threshold, the crank and the lock. */
+const FUNDING: readonly { who: Wallet; sol: number }[] = [
   { who: 'treasury', sol: 1 },
   { who: 'creator', sol: 1 },
   { who: 'trader', sol: 2 },
   { who: 'keeper', sol: 1 },
 ];
+/** The public faucet refused a single 5 SOL request. */
+const AIRDROP_MAX_SOL = 2;
+/** The daily limit does not clear within the retry window. */
+const FAUCET_DRY = /airdrop limit|run dry|too many requests/i;
 
 const results: { name: string; ok: boolean }[] = [];
 
@@ -76,13 +95,82 @@ async function airdrop(connection: Connection, to: PublicKey, sol: number): Prom
       const { value } = await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
       if (!value.err) return true;
     } catch (err) {
-      console.log(
-        `  airdrop attempt ${attempt} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(`  airdrop attempt ${attempt} failed: ${message}`);
+      if (FAUCET_DRY.test(message)) return false;
     }
     await sleep(2 ** attempt * 1000);
   }
   return false;
+}
+
+async function transferSol(
+  connection: Connection,
+  from: Keypair,
+  to: readonly { pubkey: PublicKey; lamports: bigint }[],
+): Promise<string> {
+  const tx = new Transaction();
+  for (const { pubkey, lamports } of to) {
+    tx.add(SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: pubkey, lamports }));
+  }
+  const { signature } = await sendAndConfirm({
+    connection,
+    tx,
+    signers: [from],
+    commitment: 'confirmed',
+    simulate: true,
+  });
+  return signature;
+}
+
+/** The faucet confirms on its own RPC; RPC_URL may see the balance a few slots later. */
+async function waitForLamports(connection: Connection, who: PublicKey, min: bigint) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (BigInt(await connection.getBalance(who, 'confirmed')) >= min) return true;
+    await sleep(1500);
+  }
+  return false;
+}
+
+async function fund(connection: Connection, keys: Record<Wallet, Keypair>): Promise<boolean> {
+  const lamportsOf = (sol: number) => BigInt(sol) * BigInt(LAMPORTS_PER_SOL);
+  const totalSol = FUNDING.reduce((sum, { sol }) => sum + sol, 0);
+  if (process.env.DEVNET_FUNDER_SECRET_KEY?.trim()) {
+    const funder = readSecretKeypair('DEVNET_FUNDER_SECRET_KEY');
+    const balance = BigInt(await connection.getBalance(funder.publicKey, 'confirmed'));
+    const enough = balance >= lamportsOf(totalSol) + 10_000n;
+    const label = `funder ${funder.publicKey.toBase58()} holds ${totalSol} SOL`;
+    if (!check(label, enough, `${lamportsToSol(balance)} SOL`)) return false;
+    const signature = await transferSol(
+      connection,
+      funder,
+      FUNDING.map(({ who, sol }) => ({ pubkey: keys[who].publicKey, lamports: lamportsOf(sol) })),
+    );
+    return check(`fund ${totalSol} SOL from DEVNET_FUNDER_SECRET_KEY`, true, signature);
+  }
+  const faucet = new Connection(
+    process.env.AIRDROP_RPC_URL?.trim() || DEVNET_PUBLIC_RPC,
+    'confirmed',
+  );
+  const treasury = keys.treasury.publicKey;
+  for (let remaining = totalSol; remaining > 0; remaining -= AIRDROP_MAX_SOL) {
+    if (!(await airdrop(faucet, treasury, Math.min(AIRDROP_MAX_SOL, remaining)))) {
+      return check(
+        `airdrop ${totalSol} SOL to the treasury`,
+        false,
+        'the faucet refused; fund a wallet at https://faucet.solana.com and pass it as DEVNET_FUNDER_SECRET_KEY',
+      );
+    }
+  }
+  const landed = await waitForLamports(connection, treasury, lamportsOf(totalSol));
+  if (!check(`airdrop ${totalSol} SOL to the treasury`, landed)) return false;
+  const others = FUNDING.filter(({ who }) => who !== 'treasury');
+  const signature = await transferSol(
+    connection,
+    keys.treasury,
+    others.map(({ who, sol }) => ({ pubkey: keys[who].publicKey, lamports: lamportsOf(sol) })),
+  );
+  return check(`treasury funds ${others.map(({ who }) => who).join(', ')}`, true, signature);
 }
 
 function hourStart(offsetHours: number): Date {
@@ -192,10 +280,7 @@ runMain(async () => {
   }
 
   // 1. Funding
-  for (const { who, sol } of AIRDROPS) {
-    const funded = await airdrop(connection, keys[who].publicKey, sol);
-    if (!check(`airdrop ${sol} SOL to ${who}`, funded)) return EXIT_ERROR;
-  }
+  if (!(await fund(connection, keys))) return EXIT_ERROR;
 
   // 2. Partner config with the devnet 1 SOL threshold
   const config = Keypair.generate();

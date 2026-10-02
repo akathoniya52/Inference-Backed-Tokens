@@ -14,7 +14,7 @@ export interface KeeperConfig {
   minPayoutMicroUsdc: bigint;
   /** `MAX_PAYOUT_USDC_PER_RUN`; the excess carries over (G18). */
   maxPayoutMicroUsdc: bigint;
-  /** `MAX_SLICE_SOL_PER_RUN` in lamports (G18, used from P6-T4). */
+  /** `MAX_SLICE_SOL_PER_RUN` in lamports (G18). */
   maxSliceLamports: bigint;
   /** Wait between `signatureStatus` checks on an unresolved `pendingTx` (G20). */
   pendingTxPollMs: number;

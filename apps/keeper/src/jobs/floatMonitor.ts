@@ -44,7 +44,7 @@ export async function expectedPayoutMicro(ctx: Pick<KeeperCtx, 'config'>): Promi
   return expected;
 }
 
-/** Alerts when the keeper SOL float is below `FLOAT_MIN_SOL` or the treasury cannot cover the next payouts (L251, L529). */
+/** Alerts when the keeper SOL float is below `FLOAT_MIN_SOL` or the treasury cannot cover the next payouts (L251, L530). */
 export function createFloatMonitor(
   ctx: Pick<KeeperCtx, 'chain' | 'logger' | 'alerter' | 'keeper' | 'treasury' | 'config'>,
   opts: { floatMinLamports: bigint },

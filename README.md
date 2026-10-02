@@ -165,18 +165,18 @@ Every app parses its env at startup and fails with the offending key names (valu
 
 ## Addresses
 
-| Item                                                          | Devnet                                         | Mainnet                                        |
-| ------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------- |
-| DBC program                                                   | `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN`  | same                                           |
-| DAMM v2 program                                               | `cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG`  | same                                           |
-| DAMM v2 fee config, 100 bps                                   | `Hv8Lmzmnju6m7kcokVKvwqz7QPmdX9XfKjJsXz8RXcjp` | same                                           |
-| Wrapped SOL mint                                              | `So11111111111111111111111111111111111111112`  | same                                           |
-| USDC mint                                                     | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` |
-| Platform DBC config                                           | _TBD (H4)_                                     | _TBD (H8)_                                     |
-| Treasury wallet                                               | _TBD (H1)_                                     | _TBD (H1)_                                     |
-| Treasury USDC ATA                                             | _TBD (H4)_                                     | _TBD (H8)_                                     |
-| Keeper wallet                                                 | _TBD (H1)_                                     | _TBD (H1)_                                     |
-| Model token mints, DBC pools, DAMM v2 pools, keeper positions | _TBD (H12)_                                    | _TBD (H12)_                                    |
+| Item                                                          | Devnet                                                                                 | Mainnet                                        |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| DBC program                                                   | `dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN`                                          | same                                           |
+| DAMM v2 program                                               | `cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG`                                          | same                                           |
+| DAMM v2 fee config, 100 bps                                   | `Hv8Lmzmnju6m7kcokVKvwqz7QPmdX9XfKjJsXz8RXcjp`                                         | same                                           |
+| Wrapped SOL mint                                              | `So11111111111111111111111111111111111111112`                                          | same                                           |
+| USDC mint                                                     | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`                                         | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` |
+| Platform DBC config                                           | `HDJm1Cc9gGu4Y9EnqKF59Sp65ZonMKtLG8t5Lq4RFvzX`                                         | _TBD (H8)_                                     |
+| Treasury wallet                                               | `EiH21XJyoCx17LTGWV63KxzXFDKTQA8Aw3MEQbbp1dYG`                                         | _TBD (H1)_                                     |
+| Treasury USDC ATA                                             | `6GBMbSPFragSR2Y2tqyx5qPAqmNPpyCLmo6jdmZz928q`                                         | _TBD (H8)_                                     |
+| Keeper wallet                                                 | `EiH21XJyoCx17LTGWV63KxzXFDKTQA8Aw3MEQbbp1dYG` (same wallet as the treasury on devnet) | _TBD (H1)_                                     |
+| Model token mints, DBC pools, DAMM v2 pools, keeper positions | _TBD (H12)_                                                                            | _TBD (H12)_                                    |
 
 ## Scope
 

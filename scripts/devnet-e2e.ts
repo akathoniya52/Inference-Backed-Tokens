@@ -65,12 +65,17 @@ const E2E_SPLITS = { providerBps: 1000, liquidityBps: 8000, platformBps: 1000 };
 const REVENUE_PER_RUN_MICRO = 1_000_000n;
 const SMALL_BUY_LAMPORTS = 20_000_000n;
 type Wallet = 'treasury' | 'creator' | 'trader' | 'keeper';
-/** Config rent, pool rent, the buys up to the 1 SOL threshold, the crank and the lock. */
+/**
+ * Measured on devnet (2026-10-02): the config costs the treasury about 0.01 SOL, the pool
+ * costs the creator about 0.02, the trader pays 1 / 0.7 ≈ 1.43 SOL to put 1 SOL into the
+ * curve at the 30% cliff fee, and the keeper's buy plus position rent stay under 0.05.
+ * The faucet hands out 5 SOL a day, so the run asks for little more than it spends.
+ */
 const FUNDING: readonly { who: Wallet; sol: number }[] = [
-  { who: 'treasury', sol: 1 },
-  { who: 'creator', sol: 1 },
-  { who: 'trader', sol: 2 },
-  { who: 'keeper', sol: 1 },
+  { who: 'treasury', sol: 0.1 },
+  { who: 'creator', sol: 0.1 },
+  { who: 'trader', sol: 1.7 },
+  { who: 'keeper', sol: 0.1 },
 ];
 /** The public faucet refused a single 5 SOL request. */
 const AIRDROP_MAX_SOL = 2;
@@ -90,7 +95,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function airdrop(connection: Connection, to: PublicKey, sol: number): Promise<boolean> {
   for (let attempt = 1; attempt <= 6; attempt += 1) {
     try {
-      const signature = await connection.requestAirdrop(to, sol * LAMPORTS_PER_SOL);
+      const signature = await connection.requestAirdrop(to, Math.round(sol * LAMPORTS_PER_SOL));
       const latest = await connection.getLatestBlockhash('confirmed');
       const { value } = await connection.confirmTransaction({ signature, ...latest }, 'confirmed');
       if (!value.err) return true;
@@ -133,7 +138,7 @@ async function waitForLamports(connection: Connection, who: PublicKey, min: bigi
 }
 
 async function fund(connection: Connection, keys: Record<Wallet, Keypair>): Promise<boolean> {
-  const lamportsOf = (sol: number) => BigInt(sol) * BigInt(LAMPORTS_PER_SOL);
+  const lamportsOf = (sol: number) => BigInt(Math.round(sol * LAMPORTS_PER_SOL));
   const totalSol = FUNDING.reduce((sum, { sol }) => sum + sol, 0);
   if (process.env.DEVNET_FUNDER_SECRET_KEY?.trim()) {
     const funder = readSecretKeypair('DEVNET_FUNDER_SECRET_KEY');

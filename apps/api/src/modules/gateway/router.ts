@@ -4,6 +4,7 @@ import { Models, Users, type ModelFields, type Types } from '@ibt/db';
 import {
   AppError,
   ChatCompletionRequestSchema,
+  GATEWAY_RESPONSE_HEADERS,
   RATE_LIMIT_PER_MIN,
   effectiveMaxTokens,
   microToUsdcString,
@@ -18,6 +19,13 @@ import { apiKeyAuth } from '../../middleware/apiKeyAuth.js';
 import { createRateLimit } from '../../middleware/rateLimit.js';
 import { parseInput } from '../../validate.js';
 import { completeChat } from './completions.js';
+import {
+  abandonIdempotency,
+  claimIdempotency,
+  completeIdempotency,
+  idempotencyKeyOf,
+  requestHash,
+} from './idempotency.js';
 import { streamChat } from './stream.js';
 
 interface ActiveModelRow {
@@ -92,14 +100,57 @@ export function gatewayRouter(ctx: AppContext): Router {
   router.post('/chat/completions', async (req, res) => {
     const key = requireApiKeyContext(req);
     const { body, maxTokens } = validateChatRequest(req.body);
-    const model = await resolveModel(body.model);
-    const input = { requestId: getRequestId(req) ?? randomUUID(), key, model, body, maxTokens };
-    if (body.stream === true) {
-      await streamChat(ctx, input, res);
+    const idempotencyKey = idempotencyKeyOf(req);
+    const requestId = getRequestId(req) ?? randomUUID();
+    if (idempotencyKey === undefined) {
+      const input = { requestId, key, model: await resolveModel(body.model), body, maxTokens };
+      if (body.stream === true) {
+        await streamChat(ctx, input, res);
+        return;
+      }
+      const result = await completeChat(ctx, input);
+      res.set(result.headers).type('application/json').send(result.rawBody);
       return;
     }
-    const result = await completeChat(ctx, input);
-    res.set(result.headers).type('application/json').send(result.rawBody);
+
+    const claim = await claimIdempotency(key.userId, idempotencyKey, requestHash(req.body));
+    if (claim.kind === 'replay') {
+      const { status, headers, body: stored } = claim.response;
+      res
+        .status(status)
+        .set({ ...headers, [GATEWAY_RESPONSE_HEADERS.idempotencyReplayed]: 'true' })
+        .type('application/json')
+        .send(stored);
+      return;
+    }
+    try {
+      const model = await resolveModel(body.model);
+      const input = { requestId, key, model, body, maxTokens, idempotencyKey };
+      if (body.stream === true) {
+        // A streamed call is stored, and replayed, as one assembled JSON completion.
+        const streamed = await streamChat(ctx, input, res);
+        if (streamed === null) {
+          await abandonIdempotency(claim.id);
+          return;
+        }
+        await completeIdempotency(claim.id, {
+          status: 200,
+          headers: streamed.headers,
+          body: JSON.stringify(streamed.completion),
+        });
+        return;
+      }
+      const result = await completeChat(ctx, input);
+      await completeIdempotency(claim.id, {
+        status: 200,
+        headers: result.headers,
+        body: result.rawBody,
+      });
+      res.set(result.headers).type('application/json').send(result.rawBody);
+    } catch (err) {
+      await abandonIdempotency(claim.id);
+      throw err;
+    }
   });
 
   return router;

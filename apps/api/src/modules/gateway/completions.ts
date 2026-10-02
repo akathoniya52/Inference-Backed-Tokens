@@ -24,6 +24,7 @@ export interface CompletionInput {
   model: ResolvedModel;
   body: ChatCompletionRequest;
   maxTokens: number;
+  idempotencyKey?: string;
 }
 
 export interface CompletionResult {
@@ -260,6 +261,7 @@ export async function completeChat(
     streamed: false,
     upstreamStatus: outcome.upstreamStatus,
     discountBps: held.discountBps,
+    ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
   } satisfies Partial<RequestRecord>;
 
   if (!outcome.ok) {

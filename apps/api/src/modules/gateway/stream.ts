@@ -97,6 +97,7 @@ export async function streamChat(
     streamed: true,
     upstreamStatus,
     discountBps: held.discountBps,
+    ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
     status,
     ...(usage ?? { promptTokens: 0, completionTokens: 0 }),
   });

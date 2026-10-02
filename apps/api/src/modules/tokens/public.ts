@@ -10,6 +10,7 @@ import {
   AppError,
   QuoteResponseSchema,
   SettlementsResponseSchema,
+  TokenSnapshotsResponseSchema,
   TokenStateResponseSchema,
   lamportsToSol,
   microToUsdcString,
@@ -19,6 +20,8 @@ import {
   type Settlement,
   type SettlementsResponse,
   type TokenPhase,
+  type TokenSnapshotsQuery,
+  type TokenSnapshotsResponse,
   type TokenStateResponse,
 } from '@ibt/shared';
 
@@ -74,6 +77,28 @@ export async function tokenState(mint: string): Promise<TokenStateResponse> {
       revenueUsdc24h: microToUsdcString(model.stats.revenueMicroUsdc),
       lockedLiquiditySol,
     },
+  });
+}
+
+/** `GET /api/tokens/:mint/snapshots`: the latest `limit` snapshots as a price series, oldest first. */
+export async function tokenSnapshots(
+  mint: string,
+  query: TokenSnapshotsQuery,
+): Promise<TokenSnapshotsResponse> {
+  const model = await modelByMint(mint);
+  const rows = await PoolSnapshots.find({ modelId: model._id })
+    .sort({ ts: -1 })
+    .limit(query.limit)
+    .select({ ts: 1, priceSolPerToken: 1, progress: 1, isMigrated: 1 })
+    .lean();
+  return TokenSnapshotsResponseSchema.parse({
+    mint,
+    points: rows.reverse().map((row) => ({
+      ts: row.ts.toISOString(),
+      priceSolPerToken: decimalString(row.priceSolPerToken),
+      progress: clampProgress(row.progress),
+      phase: row.isMigrated ? 'graduated' : 'curve',
+    })),
   });
 }
 

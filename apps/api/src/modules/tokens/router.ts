@@ -4,6 +4,7 @@ import {
   MintParamsSchema,
   QuoteQuerySchema,
   SettlementsQuerySchema,
+  TokenSnapshotsQuerySchema,
 } from '@ibt/shared';
 import { Router, type ErrorRequestHandler } from 'express';
 
@@ -11,7 +12,7 @@ import type { AppContext } from '../../app.js';
 import { getRequestId, requireAuthUser } from '../../context.js';
 import { jwtAuth } from '../../middleware/jwtAuth.js';
 import { parseInput } from '../../validate.js';
-import { tokenQuote, tokenSettlements, tokenState } from './public.js';
+import { tokenQuote, tokenSettlements, tokenSnapshots, tokenState } from './public.js';
 import { LaunchConflictError, confirmLaunch, prepareLaunch } from './service.js';
 
 const launchConflict: ErrorRequestHandler = (err: unknown, req, res, next) => {
@@ -42,6 +43,11 @@ export function tokensRouter(ctx: AppContext): Router {
   router.get('/:mint/state', async (req, res) => {
     const { mint } = parseInput(MintParamsSchema, req.params);
     res.json(await tokenState(mint));
+  });
+
+  router.get('/:mint/snapshots', async (req, res) => {
+    const { mint } = parseInput(MintParamsSchema, req.params);
+    res.json(await tokenSnapshots(mint, parseInput(TokenSnapshotsQuerySchema, req.query)));
   });
 
   router.get('/:mint/quote', async (req, res) => {

@@ -110,6 +110,26 @@ export const SettlementSchema = z.object({
 export const SettlementsQuerySchema = PaginationQuerySchema;
 export const SettlementsResponseSchema = paginated(SettlementSchema);
 
+export const MAX_SNAPSHOT_LIMIT = 1000;
+/** 288 polls ≈ 72 minutes at the keeper's 15 s poll rate. */
+export const DEFAULT_SNAPSHOT_LIMIT = 288;
+
+export const TokenSnapshotsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_SNAPSHOT_LIMIT).default(DEFAULT_SNAPSHOT_LIMIT),
+});
+/** One pool snapshot reduced to what the price chart needs (L358–368). */
+export const PricePointSchema = z.object({
+  ts: IsoDateTimeSchema,
+  priceSolPerToken: DecimalStringSchema,
+  progress: z.number().min(0).max(1),
+  phase: z.enum(['curve', 'graduated']),
+});
+/** `GET /api/tokens/:mint/snapshots`: the most recent points, oldest first. */
+export const TokenSnapshotsResponseSchema = z.object({
+  mint: PublicKeySchema,
+  points: z.array(PricePointSchema),
+});
+
 /** Metaplex-style JSON served at `/metadata/:mint.json` (L229). */
 export const TokenMetadataSchema = z.object({
   name: z.string(),
@@ -130,4 +150,7 @@ export type QuoteResponse = z.infer<typeof QuoteResponseSchema>;
 export type SettlementState = z.infer<typeof SettlementStateSchema>;
 export type Settlement = z.infer<typeof SettlementSchema>;
 export type SettlementsResponse = z.infer<typeof SettlementsResponseSchema>;
+export type TokenSnapshotsQuery = z.infer<typeof TokenSnapshotsQuerySchema>;
+export type PricePoint = z.infer<typeof PricePointSchema>;
+export type TokenSnapshotsResponse = z.infer<typeof TokenSnapshotsResponseSchema>;
 export type TokenMetadata = z.infer<typeof TokenMetadataSchema>;

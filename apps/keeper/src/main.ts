@@ -4,7 +4,7 @@ import { hostname } from 'node:os';
 
 import { connectDb, disconnectDb } from '@ibt/db';
 import { solToLamports } from '@ibt/shared';
-import { createAlerter, createLogger } from '@ibt/shared/node';
+import { createAlerter, createLogger, startSelfPing } from '@ibt/shared/node';
 
 import { loadEnv } from './env.js';
 import { createHealthServer } from './health-server.js';
@@ -88,10 +88,15 @@ async function main(): Promise<void> {
   const server = createHealthServer().listen(env.KEEPER_PORT, () => {
     logger.info({ port: env.KEEPER_PORT }, 'keeper health server listening');
   });
+  const selfPing = startSelfPing({
+    baseUrl: env.SELF_PING_URL ?? env.RENDER_EXTERNAL_URL,
+    logger,
+  });
   await lease.start();
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'keeper shutting down');
+    selfPing.stop();
     scheduler.stop();
     await lease.stop();
     server.close();

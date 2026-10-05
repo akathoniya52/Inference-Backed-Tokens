@@ -24,7 +24,7 @@ RUN pnpm install --frozen-lockfile
 # build: compile the server packages, then drop dev dependencies
 FROM deps AS build
 COPY . .
-RUN pnpm --filter @ibt/shared --filter @ibt/db --filter @ibt/chain --filter @ibt/api --filter @ibt/keeper build \
+RUN pnpm --filter @ibt/shared --filter @ibt/db --filter @ibt/chain --filter @ibt/api --filter @ibt/keeper --filter @ibt/mock-upstream build \
   && pnpm prune --prod
 
 # runtime: one image, start command picks api or keeper

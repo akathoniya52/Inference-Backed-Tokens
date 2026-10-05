@@ -4,7 +4,7 @@ import type { ChainClient } from '@ibt/chain';
 import { RealChainClient, USDC_MINT } from '@ibt/chain';
 import { createFakeChain, type FakeChainTx } from '@ibt/chain/testing';
 import { connectDb, connection, disconnectDb, syncAllIndexes } from '@ibt/db';
-import { createAlerter, createLogger } from '@ibt/shared/node';
+import { createAlerter, createLogger, startSelfPing } from '@ibt/shared/node';
 
 import { createApp } from './app.js';
 import { loadEnv, type ApiEnv } from './env.js';
@@ -55,12 +55,17 @@ async function main(): Promise<void> {
   const server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT, chainMode: env.CHAIN_MODE }, 'api listening');
   });
+  const selfPing = startSelfPing({
+    baseUrl: env.SELF_PING_URL ?? env.RENDER_EXTERNAL_URL,
+    logger,
+  });
 
   let stopping = false;
   const shutdown = (signal: NodeJS.Signals): void => {
     if (stopping) return;
     stopping = true;
     logger.info({ signal }, 'shutting down');
+    selfPing.stop();
     setTimeout(() => {
       logger.error('shutdown timed out');
       process.exit(1);

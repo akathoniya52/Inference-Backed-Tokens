@@ -28,6 +28,9 @@ export const KeeperEnvSchema = z.object({
   API_INTERNAL_URL: z.url().default('http://localhost:4000'),
   ADMIN_TOKEN: optional,
   KEEPER_PORT: z.coerce.number().int().min(0).max(65535).default(4001),
+  /** Self-ping target; Render sets `RENDER_EXTERNAL_URL` on every web service. */
+  SELF_PING_URL: optional.pipe(z.url().optional()),
+  RENDER_EXTERNAL_URL: optional.pipe(z.url().optional()),
   JUPITER_PRICE_URL: z.url(),
   JUPITER_API_KEY: optional,
   TELEGRAM_BOT_TOKEN: optional,

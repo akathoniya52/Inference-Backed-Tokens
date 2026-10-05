@@ -73,6 +73,10 @@ const fields = z.object({
   TELEGRAM_BOT_TOKEN: optionalString,
   TELEGRAM_CHAT_ID: optionalString,
 
+  /** Self-ping target; Render sets `RENDER_EXTERNAL_URL` on every web service. */
+  SELF_PING_URL: z.url().optional(),
+  RENDER_EXTERNAL_URL: z.url().optional(),
+
   // L190: signing keys belong to the keeper and the operator, never to the api process.
   KEEPER_SECRET_KEY: z.undefined({ error: 'must not be set for the api' }).optional(),
   TREASURY_SECRET_KEY: z.undefined({ error: 'must not be set for the api' }).optional(),

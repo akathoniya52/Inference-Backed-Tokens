@@ -1,4 +1,11 @@
-import { Models, Requests, Settlements, Types, type SettlementDoc } from '@ibt/db';
+import {
+  Models,
+  Requests,
+  Settlements,
+  Types,
+  type RequestStatus,
+  type SettlementDoc,
+} from '@ibt/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { periodFromStart, settlementPeriod } from '../src/settlement/period.js';
@@ -32,7 +39,7 @@ describe('settlement steps 1–3', () => {
     modelId: Types.ObjectId,
     cost: bigint,
     createdAt: Date,
-    status: 'success' | 'upstream_error' = 'success',
+    status: RequestStatus = 'success',
   ) {
     reqSeq += 1;
     await new Requests({
@@ -81,7 +88,7 @@ describe('settlement steps 1–3', () => {
     const other = await createTestModel(ctx);
     await addRequest(model._id, 2_000_000n, new Date(P0.getTime() + 60_000));
     await addRequest(model._id, 500_000n, new Date(P0.getTime() - 2 * HOUR + 1));
-    await addRequest(model._id, 9_000_000n, new Date(P0.getTime() + 60_000), 'upstream_error');
+    await addRequest(model._id, 0n, new Date(P0.getTime() + 60_000), 'upstream_error');
     await addRequest(model._id, 7_000_000n, new Date(P0.getTime() + HOUR));
     await addRequest(other.model._id, 3_000_000n, new Date(P0.getTime() + 60_000));
 
@@ -97,6 +104,26 @@ describe('settlement steps 1–3', () => {
 
     await tagAndSum(ctx, doc);
     expect((await reload(doc)).revenueMicroUsdc).toBe(2_500_000n);
+  });
+
+  it('tagAndSum settles captured non-success requests and skips released ones', async () => {
+    const { model } = await createTestModel(ctx);
+    const at = new Date(P0.getTime() + 60_000);
+    await addRequest(model._id, 1_200_000n, at, 'client_abort');
+    await addRequest(model._id, 300_000n, at, 'timeout');
+    await addRequest(model._id, 0n, at, 'client_abort');
+    await addRequest(model._id, 0n, at, 'upstream_error');
+
+    const doc = await open(model._id);
+    await tagAndSum(ctx, doc);
+
+    expect(doc.revenueMicroUsdc).toBe(1_500_000n);
+    expect(doc.requestCount).toBe(2);
+    const tagged = await Requests.find({ settlementId: doc._id }).lean();
+    expect(tagged.map((r) => r.status).sort()).toEqual(['client_abort', 'timeout']);
+    expect(
+      await Requests.countDocuments({ modelId: model._id, settlementId: null, costMicroUsdc: 0n }),
+    ).toBe(2);
   });
 
   it('zero revenue → done with phase none and no chain calls', async () => {

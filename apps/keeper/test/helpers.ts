@@ -10,6 +10,7 @@ import {
   disconnectDb,
   syncAllIndexes,
   type ModelDoc,
+  type RequestStatus,
 } from '@ibt/db';
 import { MIN_PAYOUT_MICRO, type IntLike } from '@ibt/shared';
 import { createLogger, type Alerter, type AlertLevel } from '@ibt/shared/node';
@@ -120,7 +121,7 @@ export async function addRequest(
   modelId: Types.ObjectId,
   cost: bigint,
   createdAt: Date,
-  status: 'success' | 'upstream_error' = 'success',
+  status: RequestStatus = 'success',
 ): Promise<void> {
   reqSeq += 1;
   await new Requests({

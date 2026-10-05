@@ -13,19 +13,28 @@ import { SOL_DECIMALS, TOKEN_DECIMALS, WSOL_MINT } from '@ibt/shared';
 import { PublicKey, type Connection, type Transaction } from '@solana/web3.js';
 import BN from 'bn.js';
 
+import { env } from '../env';
+
 // Browser-side quotes and swap builders (spec L122–123, L492). Curve phase
 // goes through the DBC SDK, graduated tokens through cp-amm (DAMM v2).
 
 export type TradeSide = 'buy' | 'sell';
 
+/** Pool and mint come from the API; every quote checks them against the chain. */
 export type TradeTarget =
-  { phase: 'curve'; pool: PublicKey } | { phase: 'graduated'; pool: PublicKey; mint: PublicKey };
+  | { phase: 'curve'; pool: PublicKey; mint: PublicKey }
+  | { phase: 'graduated'; pool: PublicKey; mint: PublicKey };
 
 export interface TradeRequest {
   side: TradeSide;
   /** Lamports when buying, token base units when selling. */
   amountIn: bigint;
   slippageBps: number;
+}
+
+export interface TradeOrder extends TradeRequest {
+  /** The "Minimum received" the user was shown; the swap never signs for less. */
+  minOut: bigint;
 }
 
 export interface TradeQuote {
@@ -63,10 +72,22 @@ function dbc(connection: Connection) {
   return new DynamicBondingCurveClient(connection, 'confirmed');
 }
 
-async function quoteCurve(connection: Connection, pool: PublicKey, request: TradeRequest) {
+function assertCurvePool(pool: { config: PublicKey; baseMint: PublicKey }, mint: PublicKey) {
+  if (!pool.config.equals(new PublicKey(env.VITE_DBC_CONFIG))) {
+    throw new Error('This pool is not on the platform bonding curve config.');
+  }
+  if (!pool.baseMint.equals(mint)) throw new Error("This pool's base mint is not this token.");
+}
+
+async function quoteCurve(
+  connection: Connection,
+  target: Extract<TradeTarget, { phase: 'curve' }>,
+  request: TradeRequest,
+) {
   const client = dbc(connection);
-  const virtualPool = await client.state.getPool(pool);
+  const virtualPool = await client.state.getPool(target.pool);
   if (!virtualPool) throw new Error('Bonding curve pool not found.');
+  assertCurvePool(virtualPool.poolState, target.mint);
   const config = await client.state.getPoolConfig(virtualPool.poolState.config);
   if (!config) throw new Error('Bonding curve config not found.');
   const currentPoint = await getCurrentPoint(connection, config.activationType);
@@ -101,12 +122,21 @@ function inputMint(side: TradeSide, mint: PublicKey): PublicKey {
 
 const decimalsOf = (mint: PublicKey) => (mint.equals(NATIVE_MINT) ? SOL_DECIMALS : TOKEN_DECIMALS);
 
+/** Quotes, decimals and the buy side all assume the token is paired with SOL. */
+function assertDammPool(state: { tokenAMint: PublicKey; tokenBMint: PublicKey }, mint: PublicKey) {
+  const { tokenAMint: a, tokenBMint: b } = state;
+  if (!((a.equals(mint) && b.equals(NATIVE_MINT)) || (b.equals(mint) && a.equals(NATIVE_MINT)))) {
+    throw new Error('This pool does not pair this token with SOL.');
+  }
+}
+
 async function quoteGraduated(
   connection: Connection,
   target: Extract<TradeTarget, { phase: 'graduated' }>,
   request: TradeRequest,
 ) {
   const { client, state } = await dammPool(connection, target.pool);
+  assertDammPool(state, target.mint);
   const currentPoint = await getDammCurrentPoint(connection, state.activationType);
   const quote = client.getQuote2({
     inputTokenMint: inputMint(request.side, target.mint),
@@ -140,36 +170,46 @@ export async function quoteTrade(
   target: TradeTarget,
   request: TradeRequest,
 ): Promise<TradeQuote> {
-  if (target.phase === 'curve') return quoteCurve(connection, target.pool, request);
+  if (target.phase === 'curve') return quoteCurve(connection, target, request);
   return (await quoteGraduated(connection, target, request)).quote;
 }
 
+function signedMinOut(fresh: TradeQuote, shownMinOut: bigint): bigint {
+  if (fresh.amountOut < shownMinOut) {
+    throw new Error(
+      'The price moved: this trade would now return less than the minimum you were shown. Check the new quote and try again.',
+    );
+  }
+  return fresh.minOut > shownMinOut ? fresh.minOut : shownMinOut;
+}
+
 /**
- * Re-quotes against fresh pool state, then builds the swap with that
- * minimum out, so the signed transaction never carries a stale bound.
+ * Re-quotes against fresh pool state and signs with the higher of that
+ * quote's minimum out and the one the user was shown, so the transaction
+ * never carries a stale or looser bound.
  */
 export async function buildTradeTransaction(
   connection: Connection,
   owner: PublicKey,
   target: TradeTarget,
-  request: TradeRequest,
+  order: TradeOrder,
 ): Promise<Transaction> {
   if (target.phase === 'curve') {
-    const quote = await quoteCurve(connection, target.pool, request);
+    const quote = await quoteCurve(connection, target, order);
     return dbc(connection).pool.swap2({
       owner,
       payer: owner,
       pool: target.pool,
-      swapBaseForQuote: request.side === 'sell',
+      swapBaseForQuote: order.side === 'sell',
       referralTokenAccount: null,
       swapMode: SwapMode.PartialFill,
       amountIn: toBN(quote.amountIn),
-      minimumAmountOut: toBN(quote.minOut),
+      minimumAmountOut: toBN(signedMinOut(quote, order.minOut)),
     });
   }
 
-  const { quote, client, state } = await quoteGraduated(connection, target, request);
-  const input = inputMint(request.side, target.mint);
+  const { quote, client, state } = await quoteGraduated(connection, target, order);
+  const input = inputMint(order.side, target.mint);
   return client.swap2({
     payer: owner,
     pool: target.pool,
@@ -185,6 +225,6 @@ export async function buildTradeTransaction(
     poolState: state,
     swapMode: DammSwapMode.ExactIn,
     amountIn: toBN(quote.amountIn),
-    minimumAmountOut: toBN(quote.minOut),
+    minimumAmountOut: toBN(signedMinOut(quote, order.minOut)),
   });
 }

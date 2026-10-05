@@ -116,13 +116,22 @@ describe('gateway: /v1/models, resolve and validation', () => {
     const both = validateChatRequest({
       model: 'm',
       messages: hello,
-      max_tokens: 64,
+      max_tokens: 32,
       max_completion_tokens: 32,
       tools: [{ type: 'function' }],
       response_format: { type: 'json_object' },
     });
     expect(both.maxTokens).toBe(32);
     expect(both.body).toHaveProperty('response_format');
+    // A3: two different limits would let one reach the upstream unheld.
+    expect(() =>
+      validateChatRequest({
+        model: 'm',
+        messages: hello,
+        max_tokens: 64,
+        max_completion_tokens: 32,
+      }),
+    ).toThrow(/max_tokens and max_completion_tokens must match/);
   });
 
   it('requires an API key', async () => {

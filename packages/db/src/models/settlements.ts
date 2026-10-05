@@ -15,6 +15,8 @@ const providerSchema = new Schema(
     amountMicroUsdc: { type: BigInt, required: true, default: 0n },
     carryOverMicroUsdc: { type: BigInt, required: true, default: 0n },
     txSignature: { type: String, default: null },
+    /** Amount and carry-over are fixed and the model's carry-over consumed, before any send. */
+    reserved: { type: Boolean, required: true, default: false },
   },
   { _id: false },
 );
@@ -55,6 +57,8 @@ const settlementSchema = new Schema(
     liquidity: { type: liquiditySchema, required: true, default: () => ({}) },
     platformMicroUsdc: { type: BigInt, required: true, default: 0n },
     pendingTx: { type: pendingTxSchema, default: null },
+    /** Lease epoch of the keeper driving this settlement; writes from older epochs are refused. */
+    leaseEpoch: { type: Number, default: null },
     attempts: { type: Number, required: true, default: 0 },
     error: { type: String, default: null },
   },

@@ -2,6 +2,7 @@ import {
   buildSignInMessage,
   NonceResponseSchema,
   SIGN_IN_STATEMENT,
+  signInChainId,
   VerifyResponseSchema,
   type NonceRequest,
   type VerifyRequest,
@@ -10,8 +11,16 @@ import { useWallet } from '@solana/wallet-adapter-react';
 import bs58 from 'bs58';
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 
+import { env } from '../env';
 import { apiFetch, isApiError } from '../lib/api';
-import { clearToken, getSession, setToken, subscribeSession, type Session } from '../lib/auth';
+import {
+  clearToken,
+  getSession,
+  getToken,
+  setToken,
+  subscribeSession,
+  type Session,
+} from '../lib/auth';
 
 export function useSession(): Session | null {
   return useSyncExternalStore(subscribeSession, getSession, getSession);
@@ -22,13 +31,31 @@ export function useSessionWallet(): string | null {
   return useSession()?.wallet ?? null;
 }
 
-/** Drops the session as soon as its wallet disconnects or another one connects. */
+/**
+ * Drops the session locally, then asks the api to revoke its JWT. The revoke is
+ * best-effort: the user is signed out here even when it fails.
+ */
+export async function signOut(): Promise<void> {
+  const token = getToken();
+  clearToken();
+  if (token === null) return;
+  try {
+    await apiFetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+  } catch (error) {
+    if (!isApiError(error)) throw error;
+  }
+}
+
+/** Signs out as soon as the session's wallet disconnects or another one connects. */
 export function useSessionWalletSync(): void {
   const session = useSession();
   const { publicKey } = useWallet();
   const connected = publicKey?.toBase58() ?? null;
   useEffect(() => {
-    if (session !== null && session.wallet !== connected) clearToken();
+    if (session !== null && session.wallet !== connected) void signOut();
   }, [session, connected]);
 }
 
@@ -48,8 +75,9 @@ interface SignInFields {
 }
 
 /**
- * Refuses to sign anything but the G22 template for this wallet and nonce, so
- * a compromised API cannot make the wallet sign arbitrary text.
+ * Refuses to sign anything but the G22 template for this wallet and nonce, bound
+ * to this page's host and the cluster the app is built for, so a compromised API
+ * cannot make the wallet sign arbitrary text or a sign-in for another site.
  */
 function expectedMessageFields(
   message: string,
@@ -70,6 +98,19 @@ function expectedMessageFields(
   };
   const expected = buildSignInMessage({ uri, chainId, wallet, nonce, issuedAt });
   return expected === message ? fields : null;
+}
+
+function assertBoundToThisApp({ uri, chainId }: SignInFields): void {
+  if (new URL(uri).host !== window.location.host) {
+    throw new SignInError(
+      `The sign-in message is for ${new URL(uri).host}, not this site. Refusing to sign.`,
+    );
+  }
+  if (chainId !== signInChainId(env.VITE_CLUSTER)) {
+    throw new SignInError(
+      `The sign-in message is for ${chainId}, not ${signInChainId(env.VITE_CLUSTER)}. Refusing to sign.`,
+    );
+  }
 }
 
 type WalletSignIn = NonNullable<ReturnType<typeof useWallet>['signIn']>;
@@ -151,12 +192,13 @@ export function useSignIn(): UseSignIn {
       );
       const fields = expectedMessageFields(message, wallet, nonce);
       if (!fields) throw new SignInError('The sign-in message from the server was not recognised.');
+      assertBoundToThisApp(fields);
 
       setStatus('signing');
       const signature = await signer(fields, message);
 
       setStatus('verifying');
-      const verifyBody: VerifyRequest & { nonce: string } = {
+      const verifyBody: VerifyRequest = {
         wallet,
         nonce,
         signature: bs58.encode(signature),

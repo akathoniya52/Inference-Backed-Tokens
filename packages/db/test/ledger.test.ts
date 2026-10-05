@@ -5,6 +5,7 @@ import { testDbUri } from './db-uri.js';
 
 import {
   ALL_MODELS,
+  DailySpend,
   Ledger,
   Requests,
   Types,
@@ -126,6 +127,106 @@ describe('ledger service', () => {
       expect(balance - held).toBeGreaterThanOrEqual(0n);
       expect(await Ledger.countDocuments({ type: 'hold', status: 'open' })).toBe(10);
     }, 60_000);
+
+    it('concurrent holds with the same requestId: exactly one succeeds', async () => {
+      const userId = await newUser(10n * USDC);
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 10 }, () => hold(userId, USDC, { requestId: 'same' })),
+      );
+
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      for (const r of results) {
+        if (r.status === 'rejected') {
+          expect(isAppError(r.reason) && r.reason.code).toBe('invalid_request');
+        }
+      }
+      expect(await balances(userId)).toEqual({ balance: 10n * USDC, held: USDC });
+      expect(await Ledger.countDocuments({ type: 'hold' })).toBe(1);
+    }, 60_000);
+
+    it('a requestId stays claimed after its hold is captured', async () => {
+      const userId = await newUser(10n * USDC);
+      const h = await hold(userId, USDC, { requestId: 'once' });
+      await capture(h.holdId, 1n, requestRecord('once'));
+
+      const err: unknown = await hold(userId, USDC, { requestId: 'once' }).catch((e: unknown) => e);
+      expect(isAppError(err) && err.code).toBe('invalid_request');
+      expect(await balances(userId)).toEqual({ balance: 10n * USDC - 1n, held: 0n });
+    });
+  });
+
+  describe('daily cap', () => {
+    const day = new Date(Date.UTC(2026, 9, 5));
+
+    function capOf(apiKeyId: Types.ObjectId, capMicro: bigint) {
+      return { apiKeyId, day, capMicro };
+    }
+
+    async function reserved(apiKeyId: Types.ObjectId): Promise<bigint | undefined> {
+      return (await DailySpend.findOne({ apiKeyId, day }).lean())?.reservedMicroUsdc;
+    }
+
+    it('concurrent holds never reserve past the cap', async () => {
+      const userId = await newUser(100n * USDC);
+      const apiKeyId = new Types.ObjectId();
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 20 }, (_, i) =>
+          hold(userId, USDC, { requestId: `cap${i}`, dailyCap: capOf(apiKeyId, 5n * USDC) }),
+        ),
+      );
+
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(5);
+      for (const r of results) {
+        if (r.status === 'rejected') {
+          expect(isAppError(r.reason) && r.reason.code).toBe('daily_cap_exceeded');
+        }
+      }
+      expect(await reserved(apiKeyId)).toBe(5n * USDC);
+      expect((await balances(userId)).held).toBe(5n * USDC);
+    }, 60_000);
+
+    it('capture keeps the billed cost and release frees the whole estimate', async () => {
+      const userId = await newUser(100n * USDC);
+      const apiKeyId = new Types.ObjectId();
+      const cap = capOf(apiKeyId, 3n * USDC);
+
+      const a = await hold(userId, 2n * USDC, { requestId: 'd1', dailyCap: cap });
+      await expect(hold(userId, 2n * USDC, { requestId: 'd2', dailyCap: cap })).rejects.toThrow();
+      await capture(a.holdId, 500_000n, requestRecord('d1'));
+      expect(await reserved(apiKeyId)).toBe(500_000n);
+
+      const b = await hold(userId, 2n * USDC, { requestId: 'd3', dailyCap: cap });
+      expect(await reserved(apiKeyId)).toBe(2_500_000n);
+      await release(b.holdId);
+      expect(await reserved(apiKeyId)).toBe(500_000n);
+
+      const c = await hold(userId, USDC, { requestId: 'd4', dailyCap: cap, expiresInMs: 1 });
+      await expireHolds(new Date(Date.now() + 1_000));
+      expect((await Ledger.findById(c.holdId).orFail()).status).toBe('expired');
+      expect(await reserved(apiKeyId)).toBe(500_000n);
+    });
+
+    it('seeds a new day from the spend already in requests', async () => {
+      const userId = await newUser(100n * USDC);
+      const apiKeyId = new Types.ObjectId();
+      await Requests.create({
+        ...requestRecord('seed'),
+        userId,
+        apiKeyId,
+        costMicroUsdc: 2n * USDC,
+        createdAt: new Date(day.getTime() + 60_000),
+      });
+
+      const err: unknown = await hold(userId, 2n * USDC, {
+        requestId: 'seeded',
+        dailyCap: capOf(apiKeyId, 3n * USDC),
+      }).catch((e: unknown) => e);
+      expect(isAppError(err) && err.code).toBe('daily_cap_exceeded');
+      expect(await reserved(apiKeyId)).toBe(2n * USDC);
+      expect(await Ledger.countDocuments({ type: 'hold' })).toBe(0);
+    });
   });
 
   describe('capture', () => {

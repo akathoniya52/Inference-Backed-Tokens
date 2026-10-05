@@ -7,8 +7,11 @@ node_modules
 .github
 .sisyphus
 *.md
-.env*
-!.env.example
+**/.env*
+!**/.env.example
+**/*.keypair.json
+**/id.json
+**/*.pem
 .DS_Store
 Dockerfile
 .dockerignore

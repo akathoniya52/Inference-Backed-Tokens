@@ -81,7 +81,7 @@ function phaseOf(status: ModelFields['token']['status']): TokenPhase {
  */
 export async function nextExpectedPayoutMicro(): Promise<bigint> {
   const sums = await Requests.aggregate<{ _id: Types.ObjectId; revenue: bigint | number }>([
-    { $match: { status: 'success', settlementId: null } },
+    { $match: { settlementId: null, costMicroUsdc: { $gt: 0 } } },
     { $group: { _id: '$modelId', revenue: { $sum: '$costMicroUsdc' } } },
   ]);
   if (sums.length === 0) return 0n;
@@ -121,12 +121,24 @@ export async function floatStatus(ctx: AppContext): Promise<FloatResponse> {
   });
 }
 
+/** Upstream probes in flight at once during `runAllHealthChecks`. */
+export const HEALTH_CHECK_CONCURRENCY = 4;
+
 /** G12: one health check per active model; the keeper calls this every 60 s. */
 export async function runAllHealthChecks(ctx: AppContext): Promise<HealthChecksRunResponse> {
   const models = await Models.find({ status: 'active' })
     .select({ slug: 1, upstream: 1, status: 1 })
     .lean<HealthCheckModel[]>();
-  const results = await Promise.all(models.map((model) => runHealthCheck(ctx, model)));
+  const queue = [...models];
+  const results: Awaited<ReturnType<typeof runHealthCheck>>[] = [];
+  const worker = async (): Promise<void> => {
+    for (let model = queue.shift(); model !== undefined; model = queue.shift()) {
+      results.push(await runHealthCheck(ctx, model));
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(HEALTH_CHECK_CONCURRENCY, queue.length) }, worker),
+  );
   return HealthChecksRunResponseSchema.parse({
     checked: results.length,
     ok: results.filter((result) => result.ok).length,

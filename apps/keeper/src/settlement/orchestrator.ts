@@ -2,6 +2,7 @@ import { Models, Settlements, type SettlementDoc, type Types } from '@ibt/db';
 
 import type { KeeperCtx } from '../ctx.js';
 import { runSettlement, type EngineOptions } from './engine.js';
+import { assertLeaseHeld } from './fence.js';
 import { settlementPeriod, type SettlementPeriod } from './period.js';
 import { lease } from './steps.js';
 
@@ -23,7 +24,10 @@ export interface OrchestratorOptions extends EngineOptions {
   concurrency?: number;
 }
 
-/** Runs `fn` over `items` with at most `limit` in flight; results keep input order. */
+/**
+ * Runs `fn` over `items` with at most `limit` in flight; results keep input order. After a
+ * failure no new item starts, and the first error is thrown once every running one ended.
+ */
 export async function mapLimit<T, R>(
   items: readonly T[],
   limit: number,
@@ -31,14 +35,20 @@ export async function mapLimit<T, R>(
 ): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  const failures: unknown[] = [];
   const worker = async () => {
-    while (next < items.length) {
+    while (failures.length === 0 && next < items.length) {
       const index = next;
       next += 1;
-      results[index] = await fn(items[index] as T);
+      try {
+        results[index] = await fn(items[index] as T);
+      } catch (err) {
+        failures.push(err);
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failures.length > 0) throw failures[0];
   return results;
 }
 
@@ -51,7 +61,13 @@ export function createOrchestrator(ctx: KeeperCtx, opts: OrchestratorOptions = {
     return new Map(rows.map((row) => [row._id.toHexString(), row.slug]));
   }
 
-  async function resume(): Promise<SettlementOutcome[]> {
+  /** One run's view of `ctx`: provider payouts share `MAX_PAYOUT_USDC_PER_RUN` (G18). */
+  const runCtx = (): KeeperCtx => ({
+    ...ctx,
+    payoutBudget: { remainingMicroUsdc: ctx.config.maxPayoutMicroUsdc },
+  });
+
+  async function resumeIn(ctx: KeeperCtx): Promise<SettlementOutcome[]> {
     const open = await Settlements.find({ state: { $nin: ['done', 'failed'] } }).sort({
       periodStart: 1,
     });
@@ -76,7 +92,8 @@ export function createOrchestrator(ctx: KeeperCtx, opts: OrchestratorOptions = {
   }
 
   async function run(period = settlementPeriod(ctx.clock.now())): Promise<SettlementOutcome[]> {
-    const resumed = await resume();
+    const ctx = runCtx();
+    const resumed = await resumeIn(ctx);
     const models = await Models.find({ status: { $ne: 'delisted' } }, { slug: 1 })
       .sort({ _id: 1 })
       .lean();
@@ -84,6 +101,7 @@ export function createOrchestrator(ctx: KeeperCtx, opts: OrchestratorOptions = {
       models,
       concurrency,
       async (model): Promise<SettlementOutcome> => {
+        assertLeaseHeld(ctx);
         const doc = await lease(ctx, { modelId: model._id, ...period });
         if (!doc) return { model: model.slug, skipped: 'already_leased' };
         return {
@@ -106,5 +124,5 @@ export function createOrchestrator(ctx: KeeperCtx, opts: OrchestratorOptions = {
     return [...resumed, ...opened];
   }
 
-  return { resume, run };
+  return { resume: () => resumeIn(runCtx()), run };
 }

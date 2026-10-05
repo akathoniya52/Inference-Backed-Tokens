@@ -10,6 +10,8 @@ const userSchema = new Schema(
     /** Sum of open holds (G14); `balance − held` is the spendable amount. */
     heldMicroUsdc: { type: BigInt, required: true, default: 0n },
     lastSeenAt: { type: Date, default: null },
+    /** Embedded as the JWT `ver` claim; bumping it (logout) revokes every issued session. */
+    tokenVersion: { type: Number, required: true, default: 0 },
   },
   { collection: 'users', timestamps: true, autoIndex: false },
 );

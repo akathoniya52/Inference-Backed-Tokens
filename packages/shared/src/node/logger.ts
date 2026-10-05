@@ -3,6 +3,7 @@ import { pino, type DestinationStream, type LevelWithSilent, type Logger } from 
 // pino paths cannot glob a key suffix, so each `*_SECRET_KEY` env name is listed.
 export const REDACT_PATHS: readonly string[] = Object.freeze([
   'req.headers.authorization',
+  'req.headers.cookie',
   'err.headers',
   '*.apiKey',
   '*.apiKeyEnc',
@@ -11,6 +12,13 @@ export const REDACT_PATHS: readonly string[] = Object.freeze([
   'ADMIN_TOKEN',
   'KEEPER_SECRET_KEY',
   'TREASURY_SECRET_KEY',
+  'TELEGRAM_BOT_TOKEN',
+  '*.MASTER_KEY',
+  '*.JWT_SECRET',
+  '*.ADMIN_TOKEN',
+  '*.KEEPER_SECRET_KEY',
+  '*.TREASURY_SECRET_KEY',
+  '*.TELEGRAM_BOT_TOKEN',
   'err.headers.authorization',
   'headers.authorization',
   '*.headers.authorization',

@@ -55,15 +55,16 @@ async function main(): Promise<void> {
   await connectDb(env.MONGODB_URI);
   try {
     const ctx = buildKeeperCtx(env, chain, { logger, alerter: createLogAlerter(logger) });
-    // Holding the keeper lease keeps a running keeper from driving the same settlements.
+    // Holding the keeper lease keeps a running keeper from driving the same settlements;
+    // it is renewed for the whole run, and the run stops at its next send once it is lost.
     const lease = createLease({
       holder: `settle-once:${hostname()}:${process.pid}`,
-      clock: ctx.clock,
       logger,
     });
-    if (!(await lease.tick())) throw new Error('keeper lease is held by another instance');
+    await lease.start();
     try {
-      const outcomes = await createOrchestrator(ctx, stepsWithPause()).run(period);
+      if (!lease.isHeld()) throw new Error('keeper lease is held by another instance');
+      const outcomes = await createOrchestrator({ ...ctx, lease }, stepsWithPause()).run(period);
       const summary = {
         chain,
         periodStart: period.periodStart.toISOString(),

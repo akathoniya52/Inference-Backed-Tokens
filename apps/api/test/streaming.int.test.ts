@@ -182,6 +182,7 @@ describe('gateway: streaming pass-through', () => {
     await seedModel('st-no-flag', mock, 'upstream:stream', false);
     await seedModel('st-no-done', mock, 'upstream:stream-no-done', true);
     await seedModel('st-500', mock, 'upstream:error500', true);
+    await seedModel('st-json', mock, 'upstream:malformed', true);
     await seedModel('st-slow', slowMock, 'upstream:slow-stream', true);
   });
 
@@ -198,7 +199,7 @@ describe('gateway: streaming pass-through', () => {
     const res = await post(server, c.key, streamBody('st-usage'));
 
     expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toContain('text/event-stream');
+    expect(res.headers['content-type']).toBe('text/event-stream; charset=utf-8');
     expect(res.headers['x-cost-usdc']).toBe(microToUsdcString(estimate));
     expect(res.headers['x-balance-usdc']).toBe(microToUsdcString(FUNDED_MICRO - estimate));
     expect(res.headers['x-discount-bps']).toBe('0');
@@ -246,17 +247,37 @@ describe('gateway: streaming pass-through', () => {
     expect(await ledgerCounts(c.userId)).toEqual({ capture: 1, release: 0 });
   });
 
-  it('a stream without [DONE] is released and recorded as upstream_error', async () => {
+  it('a stream without [DONE] bills the delivered output and is recorded as upstream_error', async () => {
     const c = await consumer();
     const res = await post(server, c.key, streamBody('st-no-done'));
 
     expect(res.status).toBe(200);
     expect(res.body.equals(Buffer.concat(writes.at(-1) ?? []))).toBe(true);
     expect(res.body.toString()).not.toContain('[DONE]');
+    // A1: the client received the completion, so it is captured, not released.
+    expect(await ledgerCounts(c.userId)).toEqual({ capture: 1, release: 0 });
+    const doc = await Requests.findOne({ requestId: res.headers['x-request-id'] }).lean();
+    expect(doc).toMatchObject({ status: 'upstream_error', streamed: true });
+    expect(doc?.costMicroUsdc).toBeGreaterThan(0n);
+    expect(doc?.costMicroUsdc).toBeLessThanOrEqual(estimate);
+    expect(await balances(c.userId)).toEqual({
+      balance: FUNDED_MICRO - (doc?.costMicroUsdc ?? 0n),
+      held: 0n,
+    });
+  });
+
+  it('a 2xx upstream that is not an event stream is a 502 and nothing is forwarded (A7)', async () => {
+    const c = await consumer();
+    const res = await request(t.app)
+      .post('/v1/chat/completions')
+      .set('Authorization', bearer(c.key))
+      .send(streamBody('st-json'));
+
+    expect(res.status).toBe(502);
+    expect(errorOf(res).code).toBe('upstream_error');
+    expect(res.text).not.toContain('chatcmpl-mock');
     expect(await ledgerCounts(c.userId)).toEqual({ capture: 0, release: 1 });
     expect(await balances(c.userId)).toEqual({ balance: FUNDED_MICRO, held: 0n });
-    const doc = await Requests.findOne({ requestId: res.headers['x-request-id'] }).lean();
-    expect(doc).toMatchObject({ status: 'upstream_error', costMicroUsdc: 0n, streamed: true });
   });
 
   it('an upstream 500 is a 502 before any byte is streamed', async () => {
@@ -316,14 +337,99 @@ describe('gateway: streaming pass-through', () => {
     ).toBe(0);
   });
 
-  it('the total timeout ends a stream that already started and releases the hold', async () => {
+  it('the total timeout ends a stream that already started and bills what was sent', async () => {
     const c = await consumer();
     const res = await post(shortServer, c.key, streamBody('st-slow'));
 
     expect(res.status).toBe(200);
     expect(res.body.toString()).not.toContain('[DONE]');
+    expect(res.body.toString()).toContain('Echo');
     const doc = await Requests.findOne({ requestId: res.headers['x-request-id'] }).lean();
-    expect(doc).toMatchObject({ status: 'timeout', costMicroUsdc: 0n, streamed: true });
-    expect(await ledgerCounts(c.userId)).toEqual({ capture: 0, release: 1 });
+    // A1: reading slowly until the timeout no longer makes the stream free.
+    expect(doc).toMatchObject({ status: 'timeout', streamed: true, usageEstimated: true });
+    expect(doc?.costMicroUsdc).toBeGreaterThan(0n);
+    expect(doc?.costMicroUsdc).toBeLessThanOrEqual(estimate);
+    expect(await ledgerCounts(c.userId)).toEqual({ capture: 1, release: 0 });
+    expect((await balances(c.userId)).held).toBe(0n);
+  });
+
+  it('a client that disconnects after receiving content is billed for it (A1)', async () => {
+    const c = await consumer();
+    const { port } = server.address() as AddressInfo;
+    const requestId = `abort-late-${Date.now()}`;
+    await new Promise<void>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: bearer(c.key),
+            'x-request-id': requestId,
+          },
+        },
+        (res) => {
+          let received = '';
+          res.on('data', (chunk: Buffer) => {
+            received += chunk.toString();
+            if (received.includes('Echo')) {
+              req.destroy();
+              resolve();
+            }
+          });
+        },
+      );
+      req.on('error', (err) => {
+        if (!req.destroyed) reject(err);
+      });
+      req.end(JSON.stringify(streamBody('st-slow')));
+    });
+
+    const doc = await waitFor(
+      () => Requests.findOne({ requestId }).lean(),
+      (row) => row !== null,
+    );
+    expect(doc).toMatchObject({ status: 'client_abort', streamed: true, usageEstimated: true });
+    expect(doc?.completionTokens).toBeGreaterThan(0);
+    expect(doc?.costMicroUsdc).toBeGreaterThan(0n);
+    expect(doc?.costMicroUsdc).toBeLessThanOrEqual(estimate);
+    expect(await ledgerCounts(c.userId)).toEqual({ capture: 1, release: 0 });
+    expect(await balances(c.userId)).toEqual({
+      balance: FUNDED_MICRO - (doc?.costMicroUsdc ?? 0n),
+      held: 0n,
+    });
+  });
+
+  it('concurrent streams with one X-Request-Id: one is served and billed, none is stuck (A2)', async () => {
+    const c = await consumer();
+    const requestId = `dup-${Date.now()}`;
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        request(t.app)
+          .post('/v1/chat/completions')
+          .set('Authorization', bearer(c.key))
+          .set('X-Request-Id', requestId)
+          .send(streamBody('st-usage')),
+      ),
+    );
+
+    const served = results.filter((res) => res.status === 200);
+    expect(served).toHaveLength(1);
+    for (const res of results.filter((r) => r.status !== 200)) {
+      expect(res.status).toBe(400);
+      expect(errorOf(res).code).toBe('invalid_request');
+    }
+    const userId = new Types.ObjectId(c.userId);
+    expect(await Ledger.countDocuments({ userId, type: 'hold' })).toBe(1);
+    expect(await Ledger.countDocuments({ userId, type: 'hold', status: 'open' })).toBe(0);
+    expect(await ledgerCounts(c.userId)).toEqual({ capture: 1, release: 0 });
+    const doc = await Requests.findOne({ requestId }).lean();
+    expect(doc).toMatchObject({ status: 'success' });
+    expect(await balances(c.userId)).toEqual({
+      balance: FUNDED_MICRO - (doc?.costMicroUsdc ?? 0n),
+      held: 0n,
+    });
   });
 });

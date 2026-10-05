@@ -33,4 +33,14 @@ describe('@ibt/db', () => {
     await session.endSession();
     expect(await Smoke.countDocuments({ n: 1 })).toBe(1);
   });
+
+  it('runs queries with strictQuery on and sanitizeFilter off', async () => {
+    expect(mongoose.get('strictQuery')).toBe(true);
+    expect(mongoose.get('sanitizeFilter')).toBeFalsy();
+    const Strict = mongoose.model('SmokeStrict', new mongoose.Schema({ n: Number }));
+    await Strict.create([{ n: 1 }, { n: 2 }]);
+    // Literal operators still work, and an unknown path never reaches Mongo.
+    expect(await Strict.countDocuments({ n: { $gt: 1 } })).toBe(1);
+    expect(Strict.find({ n: 1, notInSchema: 'x' }).cast()).toEqual({ n: 1 });
+  });
 });

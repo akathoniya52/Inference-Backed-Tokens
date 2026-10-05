@@ -314,7 +314,7 @@ Eight collections; money is stored as integer micro-USDC (1 USDC = 1,000,000) an
 | `userId`, `apiKeyId`, `modelId` | ObjectId |  |
 | `requestId` | string | Equals the `X-Request-Id` header; unique |
 | `idempotencyKey` | string | Optional, unique per user within 24 h (partial index) |
-| `status` | `"success"` / `"upstream_error"` / `"timeout"` / `"client_abort"` | Only `success` is billable |
+| `status` | `"success"` / `"upstream_error"` / `"timeout"` / `"client_abort"` | A stream cut short after delivering output is still captured under its failure status; billed means `costMicroUsdc > 0` |
 | `promptTokens`, `completionTokens`, `usageEstimated` | number, boolean |  |
 | `costMicroUsdc`, `discountBps` | number | After discount |
 | `latencyMs`, `streamed`, `upstreamStatus` | number, boolean, number |  |
@@ -370,7 +370,7 @@ Eight collections; money is stored as integer micro-USDC (1 USDC = 1,000,000) an
 ### Invariants
 
 - `users.balanceMicroUsdc` equals the ledger sum; a nightly job recomputes and logs any drift.
-- A request is billable exactly once: `status = success` and `settlementId` assigned by exactly one settlement.
+- A request is billable exactly once: `costMicroUsdc > 0` and `settlementId` assigned by exactly one settlement.
 - `deposits.txSignature` and `settlements (modelId, periodStart)` are unique, so retries cannot double-credit or double-pay.
 - Every settlement in `done` has either a provider signature or a carry-over, and either liquidity signatures or `phase: "none"`.
 

@@ -8,6 +8,7 @@ import { createAlerter, createLogger, startSelfPing } from '@ibt/shared/node';
 
 import { createApp } from './app.js';
 import { loadEnv, type ApiEnv } from './env.js';
+import { loopbackAllowlistBehindProxy } from './middleware/adminAuth.js';
 
 const SHUTDOWN_GRACE_MS = 10_000;
 
@@ -36,6 +37,13 @@ async function main(): Promise<void> {
     logger.warn(
       { cluster: env.CLUSTER },
       'USDC_MINT differs from the cluster default; using the default',
+    );
+  }
+
+  if (loopbackAllowlistBehindProxy(env)) {
+    logger.warn(
+      { trustProxy: env.TRUST_PROXY, adminIpAllowlist: env.ADMIN_IP_ALLOWLIST },
+      'ADMIN_IP_ALLOWLIST holds only loopback addresses while TRUST_PROXY is on: if the api is reachable without the proxy, a spoofed X-Forwarded-For satisfies it',
     );
   }
 

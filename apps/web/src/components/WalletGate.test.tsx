@@ -1,3 +1,4 @@
+/** @vitest-environment-options {"url": "https://ibt.test/dashboard"} */
 import { buildSignInMessage } from '@ibt/shared';
 import { useWallet, type WalletContextState } from '@solana/wallet-adapter-react';
 import { PublicKey } from '@solana/web3.js';
@@ -36,10 +37,10 @@ function walletState(state: Partial<WalletContextState>): WalletContextState {
   return { publicKey: null, connecting: false, connected: false, ...state } as WalletContextState;
 }
 
-function message(forWallet = wallet) {
+function message(forWallet = wallet, uri = 'https://ibt.test', chainId = 'solana:devnet') {
   return buildSignInMessage({
-    uri: 'https://ibt.test',
-    chainId: 'solana:devnet',
+    uri,
+    chainId,
     wallet: forWallet,
     nonce,
     issuedAt: '2026-10-02T10:00:00.000Z',
@@ -205,15 +206,40 @@ describe('WalletGate', () => {
     expect(signMessage).not.toHaveBeenCalled();
   });
 
-  it('clears the session when the wallet disconnects', async () => {
+  it.each([
+    ['another host', message(wallet, 'https://evil.test'), /evil\.test, not this site/],
+    ['another port', message(wallet, 'https://ibt.test:8443'), /ibt\.test:8443, not this site/],
+    ['another cluster', message(wallet, 'https://ibt.test', 'solana:mainnet'), /solana:mainnet/],
+  ])('refuses to sign a template-valid message for %s', async (_case, foreign, error) => {
+    const signMessage = vi.fn(() => Promise.resolve(signatureBytes));
+    const signIn = vi.fn();
+    useWalletMock.mockReturnValue(
+      walletState({ publicKey: owner, connected: true, signMessage, signIn }),
+    );
+    fetchMock.mockResolvedValueOnce(json(200, { nonce, message: foreign }));
+
+    renderGate();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with wallet' }));
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(error);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(signIn).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getToken()).toBeNull();
+  });
+
+  it('signs out even when the logout request fails', async () => {
     const signMessage = vi.fn(() => Promise.resolve(signatureBytes));
     useWalletMock.mockReturnValue(walletState({ publicKey: owner, connected: true, signMessage }));
-    fetchMock.mockResolvedValueOnce(json(200, { nonce, message: message() })).mockResolvedValueOnce(
-      json(200, {
-        token: 'jwt-abc',
-        user: { id: '66f1a2b3c4d5e6f7a8b9c0d1', wallet, role: 'consumer' },
-      }),
-    );
+    fetchMock
+      .mockResolvedValueOnce(json(200, { nonce, message: message() }))
+      .mockResolvedValueOnce(
+        json(200, {
+          token: 'jwt-abc',
+          user: { id: '66f1a2b3c4d5e6f7a8b9c0d1', wallet, role: 'consumer' },
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
     const view = renderGate();
     fireEvent.click(screen.getByRole('button', { name: 'Sign in with wallet' }));
     await screen.findByText('secret dashboard');
@@ -231,5 +257,43 @@ describe('WalletGate', () => {
 
     expect(getToken()).toBeNull();
     expect(screen.queryByText('secret dashboard')).toBeNull();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+  });
+
+  it('clears the session and revokes the JWT when the wallet disconnects', async () => {
+    const signMessage = vi.fn(() => Promise.resolve(signatureBytes));
+    useWalletMock.mockReturnValue(walletState({ publicKey: owner, connected: true, signMessage }));
+    fetchMock
+      .mockResolvedValueOnce(json(200, { nonce, message: message() }))
+      .mockResolvedValueOnce(
+        json(200, {
+          token: 'jwt-abc',
+          user: { id: '66f1a2b3c4d5e6f7a8b9c0d1', wallet, role: 'consumer' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const view = renderGate();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with wallet' }));
+    await screen.findByText('secret dashboard');
+
+    useWalletMock.mockReturnValue(walletState({}));
+    act(() => {
+      view.rerender(
+        <TestProviders>
+          <WalletGate>
+            <p>secret dashboard</p>
+          </WalletGate>
+        </TestProviders>,
+      );
+    });
+
+    expect(getToken()).toBeNull();
+    expect(screen.queryByText('secret dashboard')).toBeNull();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(fetchMock.mock.calls[2]?.[0]).toBe('http://api.test/api/auth/logout');
+    expect(fetchMock.mock.calls[2]?.[1]?.method).toBe('POST');
+    expect(new Headers(fetchMock.mock.calls[2]?.[1]?.headers).get('Authorization')).toBe(
+      'Bearer jwt-abc',
+    );
   });
 });

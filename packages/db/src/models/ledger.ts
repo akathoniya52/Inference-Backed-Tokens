@@ -11,6 +11,15 @@ const ledgerRefSchema = new Schema(
   { _id: false },
 );
 
+/** The `dailySpend` row a hold reserved against. */
+const dailyCapRefSchema = new Schema(
+  {
+    apiKeyId: { type: Schema.Types.ObjectId, required: true },
+    day: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
 const ledgerSchema = new Schema(
   {
     userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
@@ -23,12 +32,19 @@ const ledgerSchema = new Schema(
     reason: { type: String },
     balanceAfterMicroUsdc: { type: BigInt, default: null },
     expiresAt: { type: Date },
+    /** Hold rows placed under a daily cap only. */
+    dailyCap: { type: dailyCapRefSchema, default: undefined },
   },
   { collection: 'ledger', timestamps: { createdAt: true, updatedAt: false }, autoIndex: false },
 );
 
 ledgerSchema.index({ userId: 1, createdAt: 1 });
 ledgerSchema.index({ type: 1, status: 1, expiresAt: 1 });
+// One hold per request id: concurrent requests with the same id cannot both hold.
+ledgerSchema.index(
+  { 'ref.requestId': 1 },
+  { unique: true, partialFilterExpression: { type: 'hold', 'ref.requestId': { $type: 'string' } } },
+);
 
 export type LedgerFields = InferSchemaType<typeof ledgerSchema>;
 export type LedgerDoc = HydratedDocument<LedgerFields>;

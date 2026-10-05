@@ -20,7 +20,21 @@ export const ModelStatusSchema = z.enum(['active', 'paused', 'delisted']);
 export const TokenStatusSchema = z.enum(['none', 'pending', 'curve', 'graduated']);
 export const TokenSymbolSchema = z.string().regex(/^[A-Z0-9]{1,10}$/, 'symbol must be A-Z/0-9');
 
-const HttpUrlSchema = z.url({ protocol: /^https?$/ });
+const ImageUrlSchema = z.url({ protocol: /^https$/ });
+
+/**
+ * An upstream base URL: http(s) with no credentials, query or fragment, so
+ * `chatCompletionsUrl` can append a path and nothing rides along with it.
+ */
+const UpstreamBaseUrlSchema = z.url({ protocol: /^https?$/ }).refine(
+  (value) => {
+    // Unparseable values already fail the url check above.
+    if (!URL.canParse(value)) return true;
+    const url = new URL(value);
+    return url.username === '' && url.password === '' && !/[?#]/.test(value);
+  },
+  { message: 'baseUrl must not contain credentials, a query or a fragment' },
+);
 
 export const PricingSchema = z.object({
   inputPerMTokUsdc: UsdcAmountSchema,
@@ -88,9 +102,9 @@ export const CreateModelRequestSchema = z.object({
   slug: ModelSlugSchema,
   name: z.string().trim().min(1).max(80),
   description: z.string().max(2000).default(''),
-  imageUrl: HttpUrlSchema.optional(),
+  imageUrl: ImageUrlSchema.optional(),
   upstream: z.object({
-    baseUrl: HttpUrlSchema,
+    baseUrl: UpstreamBaseUrlSchema,
     modelName: z.string().min(1).max(128),
     apiKey: z.string().min(1).max(512),
     supportsStreamUsage: z.boolean().default(false),
@@ -102,10 +116,10 @@ export const UpdateModelRequestSchema = z
   .object({
     name: z.string().trim().min(1).max(80),
     description: z.string().max(2000),
-    imageUrl: HttpUrlSchema.nullable(),
+    imageUrl: ImageUrlSchema.nullable(),
     upstream: z
       .object({
-        baseUrl: HttpUrlSchema,
+        baseUrl: UpstreamBaseUrlSchema,
         modelName: z.string().min(1).max(128),
         apiKey: z.string().min(1).max(512),
         supportsStreamUsage: z.boolean(),

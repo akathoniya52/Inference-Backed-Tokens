@@ -68,13 +68,8 @@ async function main(): Promise<void> {
   scheduler.add('reconcile', env.RECONCILE_CRON, async () => {
     await reconcile.tick();
   });
-  const orchestrator = createOrchestrator(ctx);
-  scheduler.add('settle', env.SETTLEMENT_CRON, async () => {
-    await orchestrator.run();
-  });
   const lease = createLease({
     holder: `${hostname()}:${process.pid}`,
-    clock: ctx.clock,
     logger,
     onAcquired: () => {
       scheduler.start();
@@ -82,7 +77,12 @@ async function main(): Promise<void> {
       // left open. Not awaited, so a long run never delays the lease renewal.
       void scheduler.runNow('settle');
     },
+    // A run in flight stops at its next send: settlement steps check `ctx.lease` first.
     onLost: () => scheduler.stop(),
+  });
+  const orchestrator = createOrchestrator({ ...ctx, lease });
+  scheduler.add('settle', env.SETTLEMENT_CRON, async () => {
+    await orchestrator.run();
   });
 
   const server = createHealthServer().listen(env.KEEPER_PORT, () => {

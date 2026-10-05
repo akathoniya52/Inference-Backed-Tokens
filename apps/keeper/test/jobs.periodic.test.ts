@@ -102,12 +102,14 @@ describe('periodic keeper jobs', () => {
   describe('floatMonitor', () => {
     it('alerts when keeper SOL is below FLOAT_MIN_SOL and treasury USDC below the next payout', async () => {
       const { model } = await createTestModel(ctx);
-      await addRequest(model._id, micro(20), new Date());
+      await addRequest(model._id, micro(15), new Date());
+      await addRequest(model._id, micro(5), new Date(), 'timeout');
+      await addRequest(model._id, 0n, new Date(), 'upstream_error');
       await Models.updateOne(
         { _id: model._id },
         { $set: { 'token.carryOverMicroUsdc': 500_000n } },
       );
-      // No token: 90% of 20 USDC + 0.5 carry-over.
+      // No token: 90% of 20 USDC (captured timeout included) + 0.5 carry-over.
       expect(await expectedPayoutMicro(ctx)).toBe(18_500_000n);
 
       const monitor = createFloatMonitor(ctx, { floatMinLamports: 500_000_000n });
@@ -175,7 +177,8 @@ describe('periodic keeper jobs', () => {
       const ago = (h: number) => new Date(now.getTime() - h * HOUR);
       await addRequest(model._id, micro(1), ago(1));
       await addRequest(model._id, micro(2), ago(23));
-      await addRequest(model._id, micro(9), ago(2), 'upstream_error');
+      await addRequest(model._id, micro(9), ago(2), 'client_abort');
+      await addRequest(model._id, 0n, ago(3), 'upstream_error');
       await addRequest(model._id, micro(50), ago(25));
       await settlement(model._id, 1, 'done', 300_000_000n);
       await settlement(model._id, 2, 'done', 200_000_000n);
@@ -184,9 +187,9 @@ describe('periodic keeper jobs', () => {
       expect(await createStatsJob(ctx).tick()).toBeGreaterThanOrEqual(2);
       const stats = (await Models.findById(model._id).lean())?.stats;
       expect(stats).toEqual({
-        requests: 3,
-        successRate: 2 / 3,
-        revenueMicroUsdc: micro(3),
+        requests: 4,
+        successRate: 2 / 4,
+        revenueMicroUsdc: micro(12),
         lockedLiquidityLamports: 500_000_000n,
       });
       expect(lamportsToSol(stats?.lockedLiquidityLamports ?? 0n)).toBe('0.5');

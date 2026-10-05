@@ -140,6 +140,8 @@ A request is billed only when **all** of these hold:
 - token usage is known (reported by the upstream, or counted locally and flagged `usageEstimated`),
 - it isn't a replay: the same `Idempotency-Key` within 24 h returns the stored response and is never billed twice.
 
+One exception: a stream that stops early (client disconnect, timeout, upstream cut) after output was already forwarded is still captured for what was delivered, and its request is stored with status `client_abort`, `timeout` or `upstream_error`. Settlement therefore goes by cost, not status: every request with `costMicroUsdc > 0` is settled; released requests are stored with cost 0.
+
 ### 5.4 Guard rails
 
 - 60 requests per minute per key (configurable).

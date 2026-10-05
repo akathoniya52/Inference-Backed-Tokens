@@ -1,3 +1,9 @@
+import {
+  ChatCompletionRequestSchema,
+  IMAGE_PART_HOLD_TOKENS,
+  MAX_PROMPT_STRING_CHARS,
+  type ChatCompletionRequest,
+} from '@ibt/shared';
 import { describe, expect, it, vi } from 'vitest';
 
 import type * as TokenCount from '../src/modules/gateway/tokenCount.js';
@@ -12,6 +18,19 @@ describe('tokenCount', () => {
     const { count } = await freshModule();
     expect(count('Hello')).toBe(1);
     expect(count('')).toBe(0);
+  });
+
+  it('counts special-token text such as <|endoftext|> as ordinary text', async () => {
+    const { count, countPrompt } = await freshModule();
+    for (const special of ['<|endoftext|>', '<|fim_prefix|>', '<|im_start|>']) {
+      expect(count(special)).toBeGreaterThan(1);
+      expect(count(`Hello ${special} world`)).toBeGreaterThan(count('Hello  world'));
+    }
+    const body = ChatCompletionRequestSchema.parse({
+      model: 'm',
+      messages: [{ role: 'user', content: 'end <|endoftext|> here' }],
+    });
+    expect(countPrompt(body)).toBeGreaterThan(0);
   });
 
   it('counts role and string content with per-message overhead', async () => {
@@ -32,7 +51,7 @@ describe('tokenCount', () => {
     expect(n).toBe(expected);
   });
 
-  it('counts text parts of array content; non-text parts count 0', async () => {
+  it('counts text parts of array content; an image part adds the flat surcharge', async () => {
     const { count, countMessages } = await freshModule();
     const n = countMessages([
       {
@@ -46,8 +65,80 @@ describe('tokenCount', () => {
       { role: 'assistant', content: null },
     ]);
     const expected =
-      3 + count('user') + count('Hello') + count('world') + 3 + count('assistant') + 3;
+      3 +
+      count('user') +
+      count('Hello') +
+      IMAGE_PART_HOLD_TOKENS +
+      count('world') +
+      3 +
+      count('assistant') +
+      3;
     expect(n).toBe(expected);
+  });
+
+  it('counts unknown parts, tool calls and tool definitions (A4)', async () => {
+    const { count, countMessages, countPrompt } = await freshModule();
+    const part = { type: 'refusal', refusal: 'no' };
+    const toolCalls = [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }];
+    expect(countMessages([{ role: 'user', content: [part] }])).toBe(
+      3 + 3 + count('user') + count(JSON.stringify(part)),
+    );
+    expect(countMessages([{ role: 'assistant', content: null, tool_calls: toolCalls }])).toBe(
+      3 + 3 + count('assistant') + count(JSON.stringify(toolCalls)),
+    );
+
+    const messages = [{ role: 'user' as const, content: 'Hi' }];
+    const tools = [{ type: 'function', function: { name: 'f', parameters: { type: 'object' } } }];
+    const responseFormat = { type: 'json_schema', json_schema: { name: 's', schema: {} } };
+    expect(countPrompt({ model: 'm', messages, tools, response_format: responseFormat })).toBe(
+      countMessages(messages) +
+        count(JSON.stringify(tools)) +
+        count(JSON.stringify(responseFormat)),
+    );
+  });
+
+  it('counts a 200 KB run without whitespace in chunks, quickly (A5)', async () => {
+    const { count } = await freshModule();
+    count('warm up');
+    const started = performance.now();
+    const n = count('a'.repeat(200_000));
+    expect(performance.now() - started).toBeLessThan(1_500);
+    // Chunking may only overcount, never undercount: 'a' × 8 is one token at best.
+    expect(n).toBeGreaterThanOrEqual(200_000 / 8);
+    expect(count(`${'word '.repeat(1_000)}end`)).toBeGreaterThanOrEqual(1_001);
+  });
+
+  it('assertPromptSize rejects oversized strings and totals but skips media payloads', async () => {
+    const { assertPromptSize } = await freshModule();
+    const body = (content: unknown, extra: object = {}): ChatCompletionRequest =>
+      ChatCompletionRequestSchema.parse({
+        model: 'm',
+        messages: [{ role: 'user', content }],
+        ...extra,
+      });
+    const big = 'a'.repeat(MAX_PROMPT_STRING_CHARS + 1);
+    const stringTooLarge = /a prompt string exceeds/;
+
+    expect(() => assertPromptSize(body(big))).toThrow(stringTooLarge);
+    expect(() =>
+      assertPromptSize(body('hi', { tools: [{ type: 'function', description: big }] })),
+    ).toThrow(stringTooLarge);
+    const many = Array.from({ length: 5 }, () => ({ type: 'text', text: 'b'.repeat(60_000) }));
+    expect(() => assertPromptSize(body(many))).toThrow(/the prompt exceeds/);
+    // A message that pretends to be an image part is still checked.
+    expect(() =>
+      assertPromptSize(
+        ChatCompletionRequestSchema.parse({
+          model: 'm',
+          messages: [{ role: 'user', type: 'image_url', content: big }],
+        }),
+      ),
+    ).toThrow(stringTooLarge);
+
+    const image = { type: 'image_url', image_url: { url: `data:image/png;base64,${big}` } };
+    expect(() =>
+      assertPromptSize(body([image, { type: 'text', text: 'what is this?' }])),
+    ).not.toThrow();
   });
 
   it('constructs the encoder exactly once across 1,000 calls', async () => {

@@ -12,8 +12,10 @@ export const MessageSignatureSchema = z
 export const NonceRequestSchema = z.object({ wallet: PublicKeySchema });
 export const NonceResponseSchema = z.object({ nonce: z.string().min(16), message: z.string() });
 
+/** `nonce` is required: the api checks it before the signature and only then consumes it. */
 export const VerifyRequestSchema = z.object({
   wallet: PublicKeySchema,
+  nonce: NonceResponseSchema.shape.nonce.max(128),
   signature: MessageSignatureSchema,
 });
 
@@ -29,6 +31,8 @@ export const JwtClaimsSchema = z.object({
   userId: ObjectIdSchema,
   wallet: PublicKeySchema,
   role: UserRoleSchema,
+  /** The user's `tokenVersion` at signing; logout bumps it. Absent in tokens issued before it existed. */
+  ver: z.number().int().nonnegative().optional(),
 });
 
 export const MeResponseSchema = UserSchema.extend({

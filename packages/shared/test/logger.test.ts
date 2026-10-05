@@ -15,6 +15,15 @@ import {
 // Deliberately fake; the only secret-shaped value in this file.
 const FAKE_UPSTREAM_KEY = 'sk-fake-upstream-key-must-never-be-logged';
 
+const SECRET_ENV_NAMES = [
+  'MASTER_KEY',
+  'JWT_SECRET',
+  'ADMIN_TOKEN',
+  'KEEPER_SECRET_KEY',
+  'TREASURY_SECRET_KEY',
+  'TELEGRAM_BOT_TOKEN',
+];
+
 function capture(redact?: string[]) {
   const lines: string[] = [];
   const destination = new Writable({
@@ -44,6 +53,7 @@ describe('createLogger', () => {
   it('redacts exactly the documented paths', () => {
     expect(REDACT_PATHS).toEqual([
       'req.headers.authorization',
+      'req.headers.cookie',
       'err.headers',
       '*.apiKey',
       '*.apiKeyEnc',
@@ -52,6 +62,13 @@ describe('createLogger', () => {
       'ADMIN_TOKEN',
       'KEEPER_SECRET_KEY',
       'TREASURY_SECRET_KEY',
+      'TELEGRAM_BOT_TOKEN',
+      '*.MASTER_KEY',
+      '*.JWT_SECRET',
+      '*.ADMIN_TOKEN',
+      '*.KEEPER_SECRET_KEY',
+      '*.TREASURY_SECRET_KEY',
+      '*.TELEGRAM_BOT_TOKEN',
       'err.headers.authorization',
       'headers.authorization',
       '*.headers.authorization',
@@ -63,6 +80,10 @@ describe('createLogger', () => {
     [
       'req.headers.authorization (bearer token)',
       (log, key) => log.info({ req: { headers: { authorization: `Bearer ${key}` } } }, 'request'),
+    ],
+    [
+      'req.headers.cookie',
+      (log, key) => log.info({ req: { headers: { cookie: `session=${key}` } } }, 'request'),
     ],
     [
       'err.headers on an error logged as the first argument',
@@ -153,21 +174,29 @@ describe('createLogger', () => {
 
   it('censors secret env names logged at the top level', () => {
     const { logger, output, records } = capture();
-    const secretNames = [
-      'MASTER_KEY',
-      'JWT_SECRET',
-      'ADMIN_TOKEN',
-      'KEEPER_SECRET_KEY',
-      'TREASURY_SECRET_KEY',
-    ];
-    const env = Object.fromEntries(secretNames.map((name) => [name, FAKE_UPSTREAM_KEY]));
+    const env = Object.fromEntries(SECRET_ENV_NAMES.map((name) => [name, FAKE_UPSTREAM_KEY]));
 
     logger.info({ ...env, CLUSTER: 'devnet' }, 'config loaded');
 
     expect(output()).not.toContain(FAKE_UPSTREAM_KEY);
     expect(records()[0]).toMatchObject({
       CLUSTER: 'devnet',
-      ...Object.fromEntries(secretNames.map((name) => [name, '[Redacted]'])),
+      ...Object.fromEntries(SECRET_ENV_NAMES.map((name) => [name, '[Redacted]'])),
+    });
+  });
+
+  it('censors secret env names nested one level down', () => {
+    const { logger, output, records } = capture();
+    const env = Object.fromEntries(SECRET_ENV_NAMES.map((name) => [name, FAKE_UPSTREAM_KEY]));
+
+    logger.info({ env: { ...env, CLUSTER: 'devnet' } }, 'config loaded');
+
+    expect(output()).not.toContain(FAKE_UPSTREAM_KEY);
+    expect(records()[0]).toMatchObject({
+      env: {
+        CLUSTER: 'devnet',
+        ...Object.fromEntries(SECRET_ENV_NAMES.map((name) => [name, '[Redacted]'])),
+      },
     });
   });
 

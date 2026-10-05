@@ -1,7 +1,6 @@
 import { Leases } from '@ibt/db';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { systemClock } from '../src/ctx.js';
 import { createLease, type Lease } from '../src/lease.js';
 import { createScheduler, type Scheduler } from '../src/scheduler.js';
 import { makeKeeperCtx, type TestKeeperCtx } from './helpers.js';
@@ -40,7 +39,6 @@ describe('keeper lease', () => {
         holder,
         ttlMs: TTL_MS,
         renewMs: RENEW_MS,
-        clock: systemClock,
         logger: ctx.logger,
         onAcquired: () => scheduler.start(),
         onLost: () => {

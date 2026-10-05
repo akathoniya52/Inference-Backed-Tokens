@@ -11,6 +11,7 @@ import {
   billedCost,
   billingHeaders,
   openHold,
+  releaseAbandoned,
   upstreamBody,
   upstreamHeaders,
   type CompletionInput,
@@ -18,7 +19,7 @@ import {
   type UsageCount,
 } from './completions.js';
 import { SseCompletionParser } from './sse.js';
-import { count, countMessages } from './tokenCount.js';
+import { count, countPrompt } from './tokenCount.js';
 
 export interface StreamResult {
   completion: ChatCompletionResponse;
@@ -42,26 +43,51 @@ function usageOf(parser: SseCompletionParser, input: CompletionInput): UsageCoun
     };
   }
   return {
-    promptTokens: countMessages(input.body.messages),
+    promptTokens: countPrompt(input.body),
     completionTokens: count(parser.completionText()),
     usageEstimated: true,
   };
+}
+
+function failureStatus(reason: StopReason | null): RequestStatus {
+  return reason === 'client' ? 'client_abort' : reason === 'timeout' ? 'timeout' : 'upstream_error';
+}
+
+function isEventStream(contentType: string | undefined): boolean {
+  return contentType?.split(';')[0]?.trim().toLowerCase() === 'text/event-stream';
 }
 
 /**
  * Streamed gateway call (L238, L415). The upstream's bytes go to the client
  * unchanged, with back-pressure, while a parser watches for usage and
  * `[DONE]`. Errors before the response headers are thrown as usual; once the
- * headers are out, a failure ends the stream, releases the hold and resolves
- * `null`.
+ * headers are out, a failure ends the stream and resolves `null`. A stream
+ * that ends early is still billed for what the client received (A1); only a
+ * stream that delivered nothing releases the hold.
  */
 export async function streamChat(
   ctx: AppContext,
   input: CompletionInput,
   res: Response,
 ): Promise<StreamResult | null> {
-  const { requestId, key, model, body } = input;
   const held = await openHold(ctx, input);
+  try {
+    return await forwardStream(ctx, input, held, res);
+  } catch (err) {
+    await releaseAbandoned(ctx, input.requestId, held);
+    // Before the headers the error handler still answers with the error status.
+    if (res.headersSent) endResponse(res);
+    throw err;
+  }
+}
+
+async function forwardStream(
+  ctx: AppContext,
+  input: CompletionInput,
+  held: OpenHold,
+  res: Response,
+): Promise<StreamResult | null> {
+  const { requestId, key, model, body } = input;
   const { firstByteMs, totalMs } = upstreamTimeouts(ctx);
 
   const upstreamAbort = new AbortController();
@@ -108,10 +134,11 @@ export async function streamChat(
       upstream = await request(chatCompletionsUrl(model.upstream.baseUrl), {
         method: 'POST',
         headers: upstreamHeaders(ctx, model),
-        body: upstreamBody(model, body, true),
+        body: upstreamBody(model, body, true, input.maxTokens),
         headersTimeout: firstByteMs,
         bodyTimeout: totalMs,
         signal: upstreamAbort.signal,
+        dispatcher: ctx.upstreamAgent,
       });
     } catch (err) {
       return await failBeforeHeaders(ctx, input, held, record, currentReason(), err);
@@ -119,7 +146,12 @@ export async function streamChat(
       clearTimeout(firstByteTimer);
     }
     upstreamStatus = upstream.statusCode;
-    if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
+    // A 2xx that is not an event stream (an error JSON, say) is never forwarded.
+    if (
+      upstream.statusCode < 200 ||
+      upstream.statusCode >= 300 ||
+      !isEventStream(headerOf(upstream.headers['content-type']))
+    ) {
       await upstream.body.dump();
       await release(held.holdId, record('upstream_error'));
       throw new AppError('upstream_error');
@@ -127,7 +159,7 @@ export async function streamChat(
 
     res.status(200);
     res.set({
-      'Content-Type': headerOf(upstream.headers['content-type']) ?? 'text/event-stream',
+      'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache',
       ...billingHeaders(
         held.estimate,
@@ -154,18 +186,21 @@ export async function streamChat(
     }
 
     const reason = currentReason();
-    if (reason !== null || !parser.done) {
-      const status: RequestStatus =
-        reason === 'client' ? 'client_abort' : reason === 'timeout' ? 'timeout' : 'upstream_error';
-      await release(held.holdId, record(status));
+    const finished = reason === null && parser.done;
+    if (!finished && !parser.hasOutput()) {
+      await release(held.holdId, record(failureStatus(reason)));
       endResponse(res);
       return null;
     }
 
+    // Billed even when the client left or the stream was cut: the client has
+    // what was forwarded. `billedCost` still caps the bill at the hold.
     const usage = usageOf(parser, input);
     const billed = billedCost(ctx, requestId, held, usage);
-    const { balanceMicro } = await capture(held.holdId, billed, record('success', usage));
+    const status = finished ? 'success' : failureStatus(reason);
+    const { balanceMicro } = await capture(held.holdId, billed, record(status, usage));
     endResponse(res);
+    if (!finished) return null;
     return {
       completion: parser.assemble({
         prompt_tokens: usage.promptTokens,

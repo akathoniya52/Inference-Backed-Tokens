@@ -1,4 +1,4 @@
-import { FakePriceSource, deriveDammPool, type AddAndLockInput } from '@ibt/chain';
+import { deriveDammPool, type AddAndLockInput } from '@ibt/chain';
 import { FAKE_TOKENS_PER_LAMPORT, type FakeChainMethod } from '@ibt/chain/testing';
 import { Models, Requests, Settlements, Types, type SettlementDoc } from '@ibt/db';
 import { PublicKey } from '@solana/web3.js';
@@ -128,8 +128,9 @@ describe('settlement steps 4–5', () => {
 
   it('dust slice → sliceCarryOverMicroUsdc grows, zero buy calls, run finishes with phase none', async () => {
     const { model } = await createTestModel(ctx, 'curve');
-    const price = ctx.price;
-    ctx.price = new FakePriceSource(5_000_000_000);
+    // 0 lamports to spend: E5 now rejects the absurd price this test used to get dust from.
+    const cap = ctx.config.maxSliceLamports;
+    ctx.config.maxSliceLamports = 0n;
     const buysBefore = callsOf('curveBuy').length;
     try {
       const first = await open(model._id);
@@ -146,7 +147,7 @@ describe('settlement steps 4–5', () => {
       expect((await reload(second)).state).toBe('done');
       expect((await token(model._id)).sliceCarryOverMicroUsdc).toBe(micro(4));
     } finally {
-      ctx.price = price;
+      ctx.config.maxSliceLamports = cap;
     }
     expect(callsOf('curveBuy').length).toBe(buysBefore);
 

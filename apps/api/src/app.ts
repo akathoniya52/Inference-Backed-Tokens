@@ -7,10 +7,12 @@ import express, { type Express } from 'express';
 import helmet from 'helmet';
 import type { Logger } from 'pino';
 import { pinoHttp } from 'pino-http';
+import type { Dispatcher } from 'undici';
 
 import { createApiAlerts, type ApiAlerts } from './alerts.js';
 import { getAuthUser, getRequestId, type Clock } from './context.js';
 import type { ApiEnv } from './env.js';
+import { createUpstreamAgent } from './lib/upstreamAgent.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { requestId } from './middleware/requestId.js';
 import { adminRouter } from './modules/admin/router.js';
@@ -49,6 +51,8 @@ export interface AppContext {
   logger: Logger;
   /** Rolling 5xx / rejected-deposit / paused-model alerts (P5-T5). */
   alerts: ApiAlerts;
+  /** Dispatcher for provider upstream calls; refuses private addresses (SSRF). */
+  upstreamAgent: Dispatcher;
 }
 
 async function mongoReady(): Promise<boolean> {
@@ -71,6 +75,37 @@ async function chainReady(chain: ChainClient): Promise<boolean> {
   }
 }
 
+const READY_CACHE_MS = 5_000;
+
+interface Readiness {
+  ok: boolean;
+  mongo: boolean;
+  chain: boolean;
+}
+
+async function probeReadiness(chain: ChainClient): Promise<Readiness> {
+  const [mongo, chainOk] = await Promise.all([mongoReady(), chainReady(chain)]);
+  return { ok: mongo && chainOk, mongo, chain: chainOk };
+}
+
+/**
+ * `/readyz` is public, so callers share one Mongo + RPC probe per `READY_CACHE_MS`, including
+ * while it is in flight. The window starts when the probe starts, so no answer is older than the
+ * TTL; a clock that moves backwards forces a new probe.
+ */
+function cachedReadiness(chain: ChainClient, clock: Clock): () => Promise<Readiness> {
+  let startedAt = 0;
+  let result: Promise<Readiness> | undefined;
+  return () => {
+    const now = clock().getTime();
+    if (result === undefined || now < startedAt || now - startedAt >= READY_CACHE_MS) {
+      startedAt = now;
+      result = probeReadiness(chain);
+    }
+    return result;
+  };
+}
+
 /** Builds the HTTP app without binding a port, so tests can mount it anywhere. */
 export function createApp(deps: AppDeps): Express {
   const { env, chain } = deps;
@@ -84,6 +119,7 @@ export function createApp(deps: AppDeps): Express {
     timeouts: deps.timeouts ?? {},
     logger,
     alerts: createApiAlerts({ alerter: deps.alerter, clock, logger }),
+    upstreamAgent: createUpstreamAgent({ allowPrivate: env.ALLOW_PRIVATE_UPSTREAMS }),
   };
 
   const app = express();
@@ -111,10 +147,10 @@ export function createApp(deps: AppDeps): Express {
     res.json({ ok: true });
   });
 
+  const readiness = cachedReadiness(ctx.chain, ctx.clock);
   app.get('/readyz', async (_req, res) => {
-    const [mongo, chainOk] = await Promise.all([mongoReady(), chainReady(ctx.chain)]);
-    const ok = mongo && chainOk;
-    res.status(ok ? 200 : 503).json({ ok, mongo, chain: chainOk });
+    const state = await readiness();
+    res.status(state.ok ? 200 : 503).json(state);
   });
 
   app.use('/api/admin', adminRouter(ctx));

@@ -21,7 +21,8 @@ interface LiquidityRow {
 
 /**
  * Rolling 24 h `models.stats` (L308): `requests` counts every request, `successRate` the
- * share with status `success`, `revenueMicroUsdc` their cost. `lockedLiquidityLamports`
+ * share with status `success`, `revenueMicroUsdc` the cost of every billed request
+ * (including streams captured after an early stop; released ones cost 0). `lockedLiquidityLamports`
  * sums `liquidity.solAddedLamports` over the model's `done` settlements (all time); the
  * api renders it as `lockedLiquiditySol`.
  */
@@ -37,9 +38,7 @@ export function createStatsJob(ctx: Pick<KeeperCtx, 'clock' | 'logger'>) {
             _id: '$modelId',
             total: { $sum: 1 },
             success: { $sum: { $cond: [{ $eq: ['$status', 'success'] }, 1, 0] } },
-            revenue: {
-              $sum: { $cond: [{ $eq: ['$status', 'success'] }, '$costMicroUsdc', 0] },
-            },
+            revenue: { $sum: '$costMicroUsdc' },
           },
         },
       ]);

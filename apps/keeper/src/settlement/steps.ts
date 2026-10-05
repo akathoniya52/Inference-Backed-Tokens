@@ -15,12 +15,14 @@ import {
   sliceToLamports,
   splitRevenue,
   toBigInt,
+  usdcStringToMicro,
   type SettlementState,
   type TokenPhase,
 } from '@ibt/shared';
 import { PublicKey } from '@solana/web3.js';
 
 import type { KeeperCtx } from '../ctx.js';
+import { saveIf } from './fence.js';
 import type { SettlementPeriod } from './period.js';
 import {
   pendingChainStepOf,
@@ -102,6 +104,8 @@ async function loadModel(settlement: SettlementDoc) {
   return model;
 }
 
+type ModelRow = Awaited<ReturnType<typeof loadModel>>;
+
 /** Step 1: insert the `computing` doc; `null` when another runner already owns the period. */
 export async function lease(
   _ctx: KeeperCtx,
@@ -125,16 +129,30 @@ export async function lease(
  * after the crash and record an amount that differs from the transfer that landed.
  */
 const amountsFixed = (settlement: SettlementDoc): boolean =>
-  hasCompleted(settlement, 'paid_provider') || settlement.pendingTx != null;
+  hasCompleted(settlement, 'paid_provider') ||
+  settlement.pendingTx != null ||
+  settlement.provider.reserved;
 
-/** Step 2: tag every untagged billable request before `periodEnd`, then sum by `settlementId`. */
+/** Stored state under which tagging and splitting may still (re)write the amounts. */
+const AMOUNTS_OPEN = {
+  lastCompletedState: 'computing',
+  pendingTx: null,
+  'provider.reserved': { $ne: true },
+} as const;
+
+/**
+ * Step 2: tag every untagged billed request before `periodEnd`, then sum by `settlementId`.
+ * Billed means captured (`costMicroUsdc > 0`), whatever the status: a stream cut short
+ * after delivering output is charged and recorded as `client_abort`/`timeout`/
+ * `upstream_error`. Released requests are stored with cost 0 and never tagged.
+ */
 export const tagAndSum: SettlementStep = async (_ctx, settlement) => {
   if (amountsFixed(settlement)) return;
   await withTransaction(async (session) => {
     await Requests.updateMany(
       {
         modelId: settlement.modelId,
-        status: 'success',
+        costMicroUsdc: { $gt: 0n },
         settlementId: null,
         createdAt: { $lt: settlement.periodEnd },
       },
@@ -152,7 +170,7 @@ export const tagAndSum: SettlementStep = async (_ctx, settlement) => {
       settlement.liquidity.phase = 'none';
       completeState(settlement, 'done');
     }
-    await settlement.save({ session });
+    await saveIf(settlement, AMOUNTS_OPEN, session);
   });
 };
 
@@ -166,29 +184,73 @@ export const split: SettlementStep = async (_ctx, settlement) => {
   settlement.liquidity.phase = phase;
   settlement.liquidity.sliceMicroUsdc = shares.liquidityMicro;
   settlement.platformMicroUsdc = shares.platformMicro;
-  await settlement.save();
+  await saveIf(settlement, AMOUNTS_OPEN);
 };
 
-/**
- * Step 3: accrued = provider share + `token.carryOverMicroUsdc`. At least the minimum
- * pays `min(accrued, cap)` from the treasury and carries the rest (G18); below it the
- * whole amount carries over (L176). Ends in `paid_provider` either way.
- */
-export const payProvider: SettlementStep = async (ctx, settlement) => {
-  if (hasCompleted(settlement, 'paid_provider')) return;
-  const model = await loadModel(settlement);
-  const provider = await Users.findById(model.providerId, { wallet: 1 }).lean();
-  if (!provider) throw new Error(`provider of model ${model.slug} not found`);
+const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
 
+/**
+ * `min(accrued, MAX_PAYOUT_USDC_PER_RUN, what the run has left of it)`; below the minimum
+ * the whole amount carries over (L176, G18).
+ */
+function payoutAmount(ctx: KeeperCtx, accrued: bigint): bigint {
+  const { minPayoutMicroUsdc, maxPayoutMicroUsdc } = ctx.config;
+  const runLeft = ctx.payoutBudget?.remainingMicroUsdc ?? maxPayoutMicroUsdc;
+  const capped = min(min(accrued, maxPayoutMicroUsdc), runLeft);
+  return capped < minPayoutMicroUsdc ? 0n : capped;
+}
+
+/**
+ * Fixes the payout before anything is sent: the model's carry-over is consumed with a
+ * compare-and-set in the same transaction that stores amount and new carry-over on the
+ * settlement, so no two settlements (or runners) can pay the same carry-over.
+ */
+async function reservePayout(
+  ctx: KeeperCtx,
+  settlement: SettlementDoc,
+  model: ModelRow,
+): Promise<void> {
   const share =
     settlement.revenueMicroUsdc -
     settlement.liquidity.sliceMicroUsdc -
     settlement.platformMicroUsdc;
   const carry = model.token.carryOverMicroUsdc;
   const accrued = share + carry;
-  const { minPayoutMicroUsdc, maxPayoutMicroUsdc } = ctx.config;
-  const amount =
-    accrued < minPayoutMicroUsdc ? 0n : accrued > maxPayoutMicroUsdc ? maxPayoutMicroUsdc : accrued;
+  const amount = payoutAmount(ctx, accrued);
+  // Taken before the first await so the run's concurrent settlements see it at once.
+  if (ctx.payoutBudget) ctx.payoutBudget.remainingMicroUsdc -= amount;
+  try {
+    await withTransaction(async (session) => {
+      const { matchedCount } = await Models.updateOne(
+        { _id: model._id, 'token.carryOverMicroUsdc': carry },
+        { $set: { 'token.carryOverMicroUsdc': accrued - amount } },
+        { session },
+      );
+      if (matchedCount !== 1) throw new Error(`carry-over of model ${model.slug} changed mid-run`);
+      settlement.provider.amountMicroUsdc = amount;
+      settlement.provider.carryOverMicroUsdc = accrued - amount;
+      settlement.provider.reserved = true;
+      await saveIf(settlement, AMOUNTS_OPEN, session);
+    });
+  } catch (err) {
+    if (ctx.payoutBudget) ctx.payoutBudget.remainingMicroUsdc += amount;
+    throw err;
+  }
+}
+
+/**
+ * Step 3: accrued = provider share + `token.carryOverMicroUsdc`. At least the minimum
+ * pays `min(accrued, cap, run budget)` from the treasury and carries the rest (G18); below
+ * it the whole amount carries over (L176). The amount is reserved before the transfer is
+ * signed, and the step ends in `paid_provider` either way.
+ */
+export const payProvider: SettlementStep = async (ctx, settlement) => {
+  if (hasCompleted(settlement, 'paid_provider')) return;
+  const model = await loadModel(settlement);
+  const provider = await Users.findById(model.providerId, { wallet: 1 }).lean();
+  if (!provider) throw new Error(`provider of model ${model.slug} not found`);
+  if (!settlement.provider.reserved) await reservePayout(ctx, settlement, model);
+  const amount = settlement.provider.amountMicroUsdc;
 
   let signature: string | null = null;
   if (amount > 0n) {
@@ -198,27 +260,29 @@ export const payProvider: SettlementStep = async (ctx, settlement) => {
     ));
   }
 
-  await withTransaction(async (session) => {
-    const { matchedCount } = await Models.updateOne(
-      { _id: model._id, 'token.carryOverMicroUsdc': carry },
-      { $set: { 'token.carryOverMicroUsdc': accrued - amount } },
-      { session },
-    );
-    if (matchedCount !== 1) throw new Error(`carry-over of model ${model.slug} changed mid-run`);
-    settlement.provider.amountMicroUsdc = amount;
-    settlement.provider.carryOverMicroUsdc = accrued - amount;
-    settlement.provider.txSignature = signature;
-    settlement.pendingTx = null;
-    completeState(settlement, 'paid_provider');
-    await settlement.save({ session });
-  });
+  settlement.provider.txSignature = signature;
+  settlement.pendingTx = null;
+  completeState(settlement, 'paid_provider');
+  await saveIf(settlement, { lastCompletedState: 'computing' });
   ctx.logger.info(
     { settlement: settlement._id.toHexString(), amount: amount.toString(), signature },
     amount > 0n ? 'provider paid' : 'provider payout carried over',
   );
 };
 
-const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
+/** Sanity bounds for the SOL price source (E5); a price outside them is never spent at. */
+export const SOL_PRICE_MIN_USD = 1;
+export const SOL_PRICE_MAX_USD = 100_000;
+/** Largest move, in percent, from the price the last converted settlement stored. */
+export const SOL_PRICE_MAX_DEVIATION_PCT = 30n;
+
+/** The SOL price failed a sanity check; retried, and nothing is spent at it. */
+export class SolPriceRejectedError extends Error {
+  constructor(reason: string) {
+    super(`SOL price rejected: ${reason}`);
+    this.name = 'SolPriceRejectedError';
+  }
+}
 
 /** USD per SOL from the price source as integer micro-USDC per SOL. */
 export function solPriceMicro(usdPerSol: number): bigint {
@@ -226,6 +290,41 @@ export function solPriceMicro(usdPerSol: number): bigint {
     throw new RangeError(`invalid SOL price ${usdPerSol}`);
   }
   return BigInt(Math.round(usdPerSol * 1e6));
+}
+
+async function lastStoredSolPriceMicro(): Promise<bigint | null> {
+  const last = await Settlements.findOne(
+    { 'liquidity.solPriceUsdc': { $ne: null } },
+    { 'liquidity.solPriceUsdc': 1 },
+  )
+    .sort({ updatedAt: -1 })
+    .lean();
+  const stored = last?.liquidity.solPriceUsdc;
+  return stored ? usdcStringToMicro(stored) : null;
+}
+
+/** The source price as micro-USDC per SOL, after the E5 checks; a rejection alerts and throws. */
+async function checkedSolPriceMicro(ctx: KeeperCtx, settlement: SettlementDoc): Promise<bigint> {
+  const usdPerSol = await ctx.price.solUsd();
+  let reason: string | null = null;
+  if (!(usdPerSol >= SOL_PRICE_MIN_USD && usdPerSol <= SOL_PRICE_MAX_USD)) {
+    reason = `${usdPerSol} USD is outside [${SOL_PRICE_MIN_USD}, ${SOL_PRICE_MAX_USD}]`;
+  } else {
+    const last = await lastStoredSolPriceMicro();
+    const priceMicro = solPriceMicro(usdPerSol);
+    const move = last === null ? 0n : priceMicro > last ? priceMicro - last : last - priceMicro;
+    if (last !== null && move * 100n > last * SOL_PRICE_MAX_DEVIATION_PCT) {
+      reason = `${usdPerSol} USD moved more than ${SOL_PRICE_MAX_DEVIATION_PCT}% from the last stored ${microToUsdcString(last)}`;
+    } else {
+      return priceMicro;
+    }
+  }
+  await ctx.alerter.alert('warn', 'SOL price rejected', {
+    settlementId: settlement._id.toHexString(),
+    usdPerSol,
+    reason,
+  });
+  throw new SolPriceRejectedError(reason);
 }
 
 export interface SliceConversion {
@@ -276,13 +375,13 @@ export const convert: SettlementStep = async (ctx, settlement) => {
     await withTransaction(async (session) => {
       settlement.liquidity.solLamports = 0n;
       completeState(settlement, 'converted');
-      await settlement.save({ session });
+      await saveIf(settlement, { lastCompletedState: 'paid_provider' }, session);
     });
     return;
   }
 
   const model = await loadModel(settlement);
-  const priceMicro = solPriceMicro(await ctx.price.solUsd());
+  const priceMicro = await checkedSolPriceMicro(ctx, settlement);
   const carry = model.token.sliceCarryOverMicroUsdc;
   const compound = model.token.pendingCompoundLamports;
   const { lamports, compoundLeft, carryMicro } = convertSlice({
@@ -318,7 +417,7 @@ export const convert: SettlementStep = async (ctx, settlement) => {
     } else {
       completeState(settlement, 'converted');
     }
-    await settlement.save({ session });
+    await saveIf(settlement, { lastCompletedState: 'paid_provider' }, session);
   });
   ctx.logger.info(
     {
@@ -330,8 +429,6 @@ export const convert: SettlementStep = async (ctx, settlement) => {
     dust ? 'slice is dust, carried over' : 'slice converted',
   );
 };
-
-type ModelRow = Awaited<ReturnType<typeof loadModel>>;
 
 function tokenMint(model: ModelRow): PublicKey {
   if (!model.token.mint) throw new Error(`model ${model.slug} has no token mint`);
@@ -382,7 +479,7 @@ async function buyOnCurve(
       ? 0n
       : BigInt(state.migrationQuoteThreshold) - BigInt(state.quoteReserve);
     settlement.liquidity.solAddedLamports = room > 0n ? min(lamports, room) : 0n;
-    await withTransaction((session) => settlement.save({ session }));
+    await saveIf(settlement, { lastCompletedState: 'converted', pendingTx: null });
   }
   const spend = settlement.liquidity.solAddedLamports;
 
@@ -415,7 +512,7 @@ async function buyOnCurve(
     settlement.liquidity.tokensBaseUnits = tokens;
     settlement.pendingTx = null;
     completeState(settlement, 'bought');
-    await settlement.save({ session });
+    await saveIf(settlement, { lastCompletedState: 'converted' }, session);
   });
   ctx.logger.info(
     {
@@ -478,7 +575,7 @@ async function migrateIfComplete(
     settlement.liquidity.lockTxSignature = null;
     settlement.pendingTx = null;
     completeState(settlement, 'locked');
-    await settlement.save({ session });
+    await saveIf(settlement, { lastCompletedState: 'bought' }, session);
   });
   if (signature) {
     ctx.logger.info({ settlement: settlement._id.toHexString(), signature }, 'curve migrated');
@@ -520,7 +617,7 @@ async function swapHalfIfNoEscrow(
     settlement.liquidity.swapTxSignature = signature;
     settlement.pendingTx = null;
     completeState(settlement, 'bought');
-    await settlement.save({ session });
+    await saveIf(settlement, { lastCompletedState: 'converted' }, session);
   });
 }
 
@@ -551,7 +648,7 @@ async function resumeAddAndLock(
   const addSignature = settlement.liquidity.addTxSignature;
   if (chainStep === 'addLiquidity' && outcome === 'dropped') {
     settlement.pendingTx = null;
-    await withTransaction((session) => settlement.save({ session }));
+    await saveIf(settlement, { 'pendingTx.signature': pending.signature });
     return null;
   }
   if (chainStep === 'lock' && outcome === 'landed' && addSignature) {
@@ -645,7 +742,7 @@ async function addAndLockLiquidity(
     settlement.liquidity.solAddedLamports = lamportsUsed;
     settlement.pendingTx = null;
     completeState(settlement, 'locked');
-    await settlement.save({ session });
+    await saveIf(settlement, { lastCompletedState: 'bought' }, session);
   });
   ctx.logger.info(
     {
@@ -698,16 +795,32 @@ export const buyAndLock: SettlementStep = async (ctx, settlement) => {
       );
     }
     completeState(settlement, 'locked');
-    await settlement.save({ session });
+    await saveIf(settlement, { lastCompletedState: 'converted' }, session);
   });
 };
 
 const gain = (before: bigint, after: bigint): bigint => (after > before ? after - before : 0n);
 
+let claimQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs fee claims one at a time across the process (E6). A claim's amounts are the keeper's
+ * balance gain across it, and another model's claim landing in between would be counted too.
+ */
+function oneClaimAtATime<T>(claim: () => Promise<T>): Promise<T> {
+  const run = claimQueue.then(claim, claim);
+  claimQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 /**
  * Step 6: claim the keeper position's fees (L179, G19). The chain client reports no
- * amounts, so they are the keeper's balance gain across the claim; concurrent sends of
- * other models only spend SOL, so the measurement can undercount but never overcount.
+ * amounts, so they are the keeper's balance gain across the claim. Claims are serialized
+ * across models (the only keeper txs that add SOL), and other models' concurrent sends only
+ * spend SOL, so the measurement can undercount but never overcount.
  * Lamports compound into the next run's slice, base-token fees join the escrow (L127).
  * A claim recovered from a landed `pendingTx` records its signature with zero amounts.
  */
@@ -721,17 +834,22 @@ export const compound: SettlementStep = async (ctx, settlement) => {
   }
   const mint = tokenMint(model);
   const owner = ctx.keeper.publicKey;
-  const solBefore = await ctx.chain.solBalance(owner);
-  const tokensBefore = await ctx.chain.tokenBalance(owner, mint);
-  const { signature, result } = await sendWithPendingTx(ctx, settlement, 'compound', (opts) =>
-    ctx.chain.claimPositionFee(ctx.keeper, mint, position, opts),
-  );
-  let lamports = 0n;
-  let tokens = 0n;
-  if (result) {
-    lamports = gain(solBefore, await ctx.chain.solBalance(owner));
-    tokens = gain(tokensBefore, await ctx.chain.tokenBalance(owner, mint));
-  } else {
+  const { signature, lamports, tokens, recovered } = await oneClaimAtATime(async () => {
+    const solBefore = await ctx.chain.solBalance(owner);
+    const tokensBefore = await ctx.chain.tokenBalance(owner, mint);
+    const sent = await sendWithPendingTx(ctx, settlement, 'compound', (opts) =>
+      ctx.chain.claimPositionFee(ctx.keeper, mint, position, opts),
+    );
+    if (!sent.result)
+      return { signature: sent.signature, lamports: 0n, tokens: 0n, recovered: true };
+    return {
+      signature: sent.signature,
+      lamports: gain(solBefore, await ctx.chain.solBalance(owner)),
+      tokens: gain(tokensBefore, await ctx.chain.tokenBalance(owner, mint)),
+      recovered: false,
+    };
+  });
+  if (recovered) {
     ctx.logger.warn(
       { settlement: settlement._id.toHexString(), signature },
       'fee claim recovered from pendingTx; claimed amounts unknown',
@@ -751,7 +869,11 @@ export const compound: SettlementStep = async (ctx, settlement) => {
     );
     settlement.liquidity.claimTxSignature = signature;
     settlement.pendingTx = null;
-    await settlement.save({ session });
+    await saveIf(
+      settlement,
+      { lastCompletedState: 'locked', 'liquidity.claimTxSignature': null },
+      session,
+    );
   });
   ctx.logger.info(
     {

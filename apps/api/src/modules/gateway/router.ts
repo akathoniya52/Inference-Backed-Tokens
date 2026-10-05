@@ -28,6 +28,7 @@ import {
   requestHash,
 } from './idempotency.js';
 import { streamChat } from './stream.js';
+import { assertPromptSize } from './tokenCount.js';
 
 interface ActiveModelRow {
   _id: Types.ObjectId;
@@ -55,6 +56,13 @@ export interface ValidatedChatRequest {
 
 export function validateChatRequest(body: unknown): ValidatedChatRequest {
   const parsed = parseInput(ChatCompletionRequestSchema, body);
+  const { max_tokens: maxTokens, max_completion_tokens: maxCompletionTokens } = parsed;
+  if (maxTokens != null && maxCompletionTokens != null && maxTokens !== maxCompletionTokens) {
+    throw new AppError('invalid_request', {
+      message: 'max_tokens and max_completion_tokens must match when both are set',
+    });
+  }
+  assertPromptSize(parsed);
   return { body: parsed, maxTokens: effectiveMaxTokens(parsed) };
 }
 

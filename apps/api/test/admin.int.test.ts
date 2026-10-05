@@ -101,6 +101,23 @@ describe('admin module', () => {
         .set('Authorization', bearer('nope'));
       expect(wrongToken.status).toBe(401);
     });
+
+    it('rate limits to 30/min per client address, counting failed tokens', async () => {
+      const ip = '203.0.113.77';
+      for (let i = 0; i < 30; i += 1) {
+        const res = await request(t.app)
+          .get('/api/admin/float')
+          .set('X-Forwarded-For', ip)
+          .set('Authorization', bearer(`guess-${i}`));
+        expect(res.status).toBe(401);
+      }
+      const limited = await admin('get', '/float').set('X-Forwarded-For', ip);
+      expect(limited.status).toBe(429);
+      expect(errorOf(limited).code).toBe('rate_limited');
+
+      const other = await admin('get', '/float').set('X-Forwarded-For', '203.0.113.78');
+      expect(other.status).toBe(200);
+    });
   });
 
   describe('POST /settlements/:id/retry', () => {
@@ -183,6 +200,13 @@ describe('admin module', () => {
           settlementId: new Types.ObjectId(),
         },
         { ...base, modelId: noToken, requestId: 'f4', status: 'upstream_error', costMicroUsdc: 0n },
+        {
+          ...base,
+          modelId: noToken,
+          requestId: 'f5',
+          status: 'client_abort',
+          costMicroUsdc: 10_000_000n,
+        },
       ]);
       t.chain.setSol(toPublicKey(keeperWallet), 300_000_000n);
       t.chain.setUsdc(toPublicKey(treasuryWallet), 15_000_000n);
@@ -194,14 +218,15 @@ describe('admin module', () => {
         treasury: {
           wallet: treasuryWallet,
           usdc: '15.000000',
-          // 70% of 10 (token launched) + 90% of 10 (no token yet, G17).
-          nextExpectedPayoutUsdc: '16.000000',
+          // 70% of 10 (token launched) + 90% of 20 (no token yet, G17), the
+          // captured client_abort included.
+          nextExpectedPayoutUsdc: '25.000000',
           belowNextPayout: true,
         },
       });
 
       t.chain.setSol(toPublicKey(keeperWallet), 2_000_000_000n);
-      t.chain.setUsdc(toPublicKey(treasuryWallet), 16_000_000n);
+      t.chain.setUsdc(toPublicKey(treasuryWallet), 25_000_000n);
       const healthy = FloatResponseSchema.parse((await admin('get', '/float')).body);
       expect(healthy.keeper.belowMin).toBe(false);
       expect(healthy.treasury.belowNextPayout).toBe(false);

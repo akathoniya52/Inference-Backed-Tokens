@@ -49,6 +49,7 @@ async function probe(ctx: AppContext, model: HealthCheckModel): Promise<ProbeRes
       headersTimeout: firstByteMs,
       bodyTimeout: totalMs,
       signal: AbortSignal.timeout(totalMs),
+      dispatcher: ctx.upstreamAgent,
     });
     if (res.statusCode < 200 || res.statusCode >= 300) {
       await res.body.dump();

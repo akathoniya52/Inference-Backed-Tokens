@@ -1,18 +1,14 @@
-import { NonceRequestSchema, NonceResponseSchema, VerifyRequestSchema } from '@ibt/shared';
+import { NonceRequestSchema, VerifyRequestSchema } from '@ibt/shared';
 import { Router } from 'express';
 
 import type { AppContext } from '../../app.js';
+import { requireAuthUser } from '../../context.js';
+import { jwtAuth } from '../../middleware/jwtAuth.js';
 import { createRateLimit } from '../../middleware/rateLimit.js';
 import { parseInput } from '../../validate.js';
-import { issueNonce, verifySignIn } from './service.js';
+import { issueNonce, revokeSessions, verifySignIn } from './service.js';
 
 const AUTH_LIMIT_PER_MIN = 10;
-
-// The spec body is `{wallet, signature}` (L388); `nonce` pins a specific
-// issued nonce and is optional so the shared schema stays the contract.
-const VerifyBodySchema = VerifyRequestSchema.extend({
-  nonce: NonceResponseSchema.shape.nonce.max(128).optional(),
-});
 
 export function authRouter(ctx: AppContext): Router {
   const router = Router();
@@ -23,9 +19,16 @@ export function authRouter(ctx: AppContext): Router {
     res.json(await issueNonce(ctx, wallet));
   });
 
+  // The spec body is `{wallet, signature}` (L388); `nonce` is required on top so
+  // verify checks the exact issued nonce before it is consumed.
   router.post('/verify', async (req, res) => {
-    const body = parseInput(VerifyBodySchema, req.body);
+    const body = parseInput(VerifyRequestSchema, req.body);
     res.json(await verifySignIn(ctx, body));
+  });
+
+  router.post('/logout', jwtAuth(ctx), async (req, res) => {
+    await revokeSessions(requireAuthUser(req).userId);
+    res.status(204).end();
   });
 
   return router;

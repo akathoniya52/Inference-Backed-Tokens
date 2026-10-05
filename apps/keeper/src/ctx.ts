@@ -22,6 +22,19 @@ export interface KeeperConfig {
   pendingTxMaxPolls: number;
 }
 
+/** The keeper lease as a settlement run sees it: checked before every chain send. */
+export interface LeaseGuard {
+  /** False once the lease is lost, released or not renewed within its TTL. */
+  isHeld(): boolean;
+  /** Fencing token of this tenure, above every earlier holder's; `null` while not held. */
+  epoch(): number | null;
+}
+
+/** What one run may still pay providers (`MAX_PAYOUT_USDC_PER_RUN` across all models). */
+export interface PayoutBudget {
+  remainingMicroUsdc: bigint;
+}
+
 /** Everything a keeper job or settlement step needs; tests build it with `makeKeeperCtx()`. */
 export interface KeeperCtx {
   chain: ChainClient;
@@ -37,6 +50,10 @@ export interface KeeperCtx {
   /** Current block height, compared against `pendingTx.lastValidBlockHeight` (G20). */
   blockHeight(): Promise<number>;
   sleep(ms: number): Promise<void>;
+  /** The lease guarding settlement runs; unset only in tests that drive steps directly. */
+  lease?: LeaseGuard;
+  /** Set per run by the orchestrator; without it only the per-model payout cap applies. */
+  payoutBudget?: PayoutBudget;
 }
 
 export const sleep = (ms: number): Promise<void> =>

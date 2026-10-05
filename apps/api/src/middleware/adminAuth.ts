@@ -4,15 +4,33 @@ import { AppError } from '@ibt/shared';
 import type { RequestHandler } from 'express';
 
 import type { AppContext } from '../app.js';
+import type { ApiEnv } from '../env.js';
 
 const BEARER = /^Bearer\s+(\S+)$/i;
 const IPV4_MAPPED = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/;
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', 'localhost']);
 
 const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest();
 
 export function normalizeIp(ip: string | undefined): string {
   const value = ip ?? '';
   return IPV4_MAPPED.exec(value)?.[1] ?? value;
+}
+
+/**
+ * A loopback-only allowlist is satisfied by any client that reaches the api
+ * directly and sends `X-Forwarded-For: 127.0.0.1` while `trust proxy` is on.
+ */
+export function loopbackAllowlistBehindProxy(
+  env: Pick<ApiEnv, 'ADMIN_IP_ALLOWLIST' | 'TRUST_PROXY'>,
+): boolean {
+  const allowlist = env.ADMIN_IP_ALLOWLIST.map(normalizeIp);
+  return (
+    allowlist.length > 0 &&
+    allowlist.every((ip) => LOOPBACK_ADDRESSES.has(ip)) &&
+    env.TRUST_PROXY !== false &&
+    env.TRUST_PROXY !== 0
+  );
 }
 
 /**

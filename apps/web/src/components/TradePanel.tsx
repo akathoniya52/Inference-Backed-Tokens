@@ -35,8 +35,8 @@ const TX_PROGRESS: Partial<Record<SendTxStatus, string>> = {
 
 export function tradeTarget(model: Model): TradeTarget | null {
   const { token } = model;
-  if (token.status === 'curve' && token.dbcPool !== null) {
-    return { phase: 'curve', pool: new PublicKey(token.dbcPool) };
+  if (token.status === 'curve' && token.dbcPool !== null && token.mint !== null) {
+    return { phase: 'curve', pool: new PublicKey(token.dbcPool), mint: new PublicKey(token.mint) };
   }
   if (token.status === 'graduated' && token.dammV2Pool !== null && token.mint !== null) {
     return {
@@ -119,10 +119,10 @@ export function TradePanel({ model }: { model: Model }) {
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (target === null || amountIn === null) return;
-    const request = { side, amountIn, slippageBps };
+    if (target === null || amountIn === null || !fresh) return;
+    const order = { side, amountIn, slippageBps, minOut: quote.data.minOut };
     void send({
-      build: ({ connection, payer }) => buildTradeTransaction(connection, payer, target, request),
+      build: ({ connection, payer }) => buildTradeTransaction(connection, payer, target, order),
       invalidate: model.token.mint
         ? [
             publicQueryKeys.tokenState(model.token.mint),
@@ -132,6 +132,7 @@ export function TradePanel({ model }: { model: Model }) {
         : [publicQueryKeys.model(model.slug)],
     }).then((outcome) => {
       if (outcome.ok) setAmount('');
+      else void quote.refetch();
     });
   }
 

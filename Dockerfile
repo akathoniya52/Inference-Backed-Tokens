@@ -24,6 +24,8 @@ RUN pnpm install --frozen-lockfile
 # build: compile the server packages, then drop dev dependencies
 FROM deps AS build
 COPY . .
+# Backstop for .dockerignore: no local env file may reach the runtime image.
+RUN find . -name node_modules -prune -o -name '.env*' ! -name '.env.example' -type f -exec rm -f {} +
 RUN pnpm --filter @ibt/shared --filter @ibt/db --filter @ibt/chain --filter @ibt/api --filter @ibt/keeper --filter @ibt/mock-upstream build \
   && pnpm prune --prod
 

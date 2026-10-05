@@ -1,4 +1,5 @@
 import { ApiKeys } from './apiKeys.js';
+import { DailySpend } from './dailySpend.js';
 import { Deposits } from './deposits.js';
 import { Idempotency } from './idempotency.js';
 import { Leases } from './leases.js';
@@ -11,6 +12,7 @@ import { Settlements } from './settlements.js';
 import { Users } from './users.js';
 
 export * from './apiKeys.js';
+export * from './dailySpend.js';
 export * from './deposits.js';
 export * from './idempotency.js';
 export * from './leases.js';
@@ -34,6 +36,7 @@ export const ALL_MODELS = Object.freeze([
   Nonces,
   Idempotency,
   Leases,
+  DailySpend,
 ] as const);
 
 /** Creates every collection and index (schemas use `autoIndex: false`, G11). */

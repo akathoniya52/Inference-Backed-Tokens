@@ -10,6 +10,7 @@ const nonceSchema = new Schema(
 );
 
 nonceSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+nonceSchema.index({ wallet: 1, nonce: 1 });
 
 export type NonceFields = InferSchemaType<typeof nonceSchema>;
 export type NonceDoc = HydratedDocument<NonceFields>;

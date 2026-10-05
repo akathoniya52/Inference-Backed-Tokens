@@ -48,6 +48,12 @@ export class SseCompletionParser {
       .join('');
   }
 
+  /** True once a billable delta (content, tool calls) or usage went through the parser. */
+  hasOutput(): boolean {
+    if (this.usage !== null) return true;
+    return [...this.choices.values()].some((c) => c.content.length > 0 || c.toolCalls.length > 0);
+  }
+
   /** The stream folded into one non-streamed completion (idempotent replay, L148). */
   assemble(usage: Usage): ChatCompletionResponse {
     const choices = [...this.choices.entries()]

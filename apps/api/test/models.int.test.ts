@@ -223,6 +223,35 @@ describe('models', () => {
     expect(missing.status).toBe(404);
   });
 
+  it('PATCH to a new upstream.baseUrl requires re-supplying upstream.apiKey', async () => {
+    const created = OwnerModelSchema.parse((await create(owner)).body);
+    const patch = (upstream: Record<string, string>) =>
+      request(t.app)
+        .patch(`/api/models/${created.id}`)
+        .set('Authorization', bearer(owner))
+        .send({ upstream });
+
+    const moved = record(await patch({ baseUrl: 'https://attacker.example/v1' }));
+    expect(moved.status).toBe(400);
+    expect(errorOf(moved).code).toBe('invalid_request');
+    expect((await Models.findById(created.id).lean())?.upstream.baseUrl).toBe(
+      created.upstream.baseUrl,
+    );
+
+    const unchanged = record(await patch({ baseUrl: created.upstream.baseUrl, modelName: 'm2' }));
+    expect(unchanged.status).toBe(200);
+
+    const newKey = `sk-moved-${Math.random().toString(36).slice(2)}`;
+    PLAINTEXT_KEYS.push(newKey);
+    const withKey = record(await patch({ baseUrl: 'https://api.example.com/v1', apiKey: newKey }));
+    expect(withKey.status).toBe(200);
+    expect(OwnerModelSchema.parse(withKey.body).upstream.baseUrl).toBe(
+      'https://api.example.com/v1',
+    );
+    const stored = await Models.findById(created.id).lean();
+    expect(decrypt(stored?.upstream.apiKeyEnc ?? '', t.env.MASTER_KEY)).toBe(newKey);
+  });
+
   it('no response body ever contains apiKeyEnc or a plaintext upstream key', () => {
     expect(bodies.length).toBeGreaterThan(10);
     for (const text of bodies) {

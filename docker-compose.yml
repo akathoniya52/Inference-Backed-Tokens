@@ -4,7 +4,9 @@ services:
     image: mongo:7
     command: ['mongod', '--replSet', 'rs0', '--bind_ip_all']
     ports:
-      - '27017:27017'
+      # No auth, so publish on the host's loopback only. --bind_ip_all stays:
+      # Docker forwards to the container's interface, not its loopback.
+      - '127.0.0.1:27017:27017'
     volumes:
       - mongo-data:/data/db
     healthcheck:

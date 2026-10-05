@@ -1,4 +1,12 @@
-import { Requests, Types, capture, hold, release, type RequestRecord } from '@ibt/db';
+import {
+  Requests,
+  Types,
+  capture,
+  hold,
+  release,
+  type DailyCapOptions,
+  type RequestRecord,
+} from '@ibt/db';
 import {
   AppError,
   ChatCompletionResponseSchema,
@@ -17,7 +25,7 @@ import type { AppContext } from '../../app.js';
 import type { ApiKeyContext } from '../../context.js';
 import { chatCompletionsUrl, isUpstreamTimeout, upstreamTimeouts } from '../../lib/upstream.js';
 import type { ResolvedModel } from './router.js';
-import { count, countMessages } from './tokenCount.js';
+import { count, countPrompt } from './tokenCount.js';
 
 export interface CompletionInput {
   requestId: string;
@@ -42,17 +50,33 @@ type UpstreamOutcome =
 /**
  * Body sent upstream: the provider's model name, and `stream_options` only on a
  * streamed call to an upstream flagged `supportsStreamUsage` (G28); some
- * upstreams reject the field with a 400.
+ * upstreams reject the field with a 400. The completion limit is always the
+ * held `maxTokens`, under the field name the client used (`max_tokens` by
+ * default), so the output can never outgrow the hold.
  */
 export function upstreamBody(
   model: ResolvedModel,
   body: ChatCompletionRequest,
   stream: boolean,
+  maxTokens: number,
 ): string {
-  const { stream_options: _streamOptions, ...rest } = body;
+  const {
+    stream_options: _streamOptions,
+    max_tokens: _maxTokens,
+    max_completion_tokens: maxCompletionTokens,
+    ...rest
+  } = body;
   const usageOption =
     stream && model.upstream.supportsStreamUsage ? { stream_options: { include_usage: true } } : {};
-  return JSON.stringify({ ...rest, model: model.upstream.modelName, stream, ...usageOption });
+  const limit =
+    maxCompletionTokens == null ? { max_tokens: maxTokens } : { max_completion_tokens: maxTokens };
+  return JSON.stringify({
+    ...rest,
+    model: model.upstream.modelName,
+    stream,
+    ...limit,
+    ...usageOption,
+  });
 }
 
 export function upstreamHeaders(ctx: AppContext, model: ResolvedModel): Record<string, string> {
@@ -73,11 +97,8 @@ function parseCompletion(text: string): ChatCompletionResponse | null {
   return parsed.success ? parsed.data : null;
 }
 
-async function callUpstream(
-  ctx: AppContext,
-  model: ResolvedModel,
-  body: ChatCompletionRequest,
-): Promise<UpstreamOutcome> {
+async function callUpstream(ctx: AppContext, input: CompletionInput): Promise<UpstreamOutcome> {
+  const { model, body } = input;
   const { firstByteMs, totalMs } = upstreamTimeouts(ctx);
   // undici's `headersTimeout` ticks on a coarse (~0.5–1 s) timer wheel, so a
   // native timer enforces the first-byte deadline precisely as well.
@@ -91,10 +112,11 @@ async function callUpstream(
     const res = await request(chatCompletionsUrl(model.upstream.baseUrl), {
       method: 'POST',
       headers: upstreamHeaders(ctx, model),
-      body: upstreamBody(model, body, false),
+      body: upstreamBody(model, body, false, input.maxTokens),
       headersTimeout: firstByteMs,
       bodyTimeout: totalMs,
       signal,
+      dispatcher: ctx.upstreamAgent,
     });
     clearTimeout(firstByteTimer);
     upstreamStatus = res.statusCode;
@@ -141,7 +163,7 @@ function usageOf(response: ChatCompletionResponse, body: ChatCompletionRequest):
     };
   }
   return {
-    promptTokens: countMessages(body.messages),
+    promptTokens: countPrompt(body),
     completionTokens: count(completionText(response)),
     usageEstimated: true,
   };
@@ -150,28 +172,16 @@ function usageOf(response: ChatCompletionResponse, body: ChatCompletionRequest):
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * G21: today's (UTC) billed cost on this key must be below its cap before a new
- * hold. Matches on `{userId, createdAt}` (indexed), then narrows to the key.
+ * G21: the hold also reserves its estimate against today's (UTC) cap of the
+ * key, so captured spend + open holds + this estimate never exceed the cap.
  */
-async function assertUnderDailyCap(ctx: AppContext, key: ApiKeyContext): Promise<void> {
+function dailyCapOf(ctx: AppContext, key: ApiKeyContext): DailyCapOptions {
   const now = ctx.clock().getTime();
-  const dayStart = new Date(now - (now % DAY_MS));
-  const [row] = await Requests.aggregate<{ spent: bigint | number }>([
-    {
-      $match: {
-        userId: new Types.ObjectId(key.userId),
-        createdAt: { $gte: dayStart },
-        apiKeyId: new Types.ObjectId(key.apiKeyId),
-      },
-    },
-    { $group: { _id: null, spent: { $sum: '$costMicroUsdc' } } },
-  ]);
-  const spent = row ? BigInt(row.spent) : 0n;
-  if (spent >= key.dailyCapMicroUsdc) {
-    throw new AppError('daily_cap_exceeded', {
-      details: { dailyCapUsdc: microToUsdcString(key.dailyCapMicroUsdc) },
-    });
-  }
+  return {
+    apiKeyId: key.apiKeyId,
+    day: new Date(now - (now % DAY_MS)),
+    capMicro: key.dailyCapMicroUsdc,
+  };
 }
 
 export interface Pricing {
@@ -190,11 +200,10 @@ export interface OpenHold {
 /** Gateway steps 3–4 (L236–237): reuse and daily-cap checks, then hold the worst case. */
 export async function openHold(ctx: AppContext, input: CompletionInput): Promise<OpenHold> {
   const { requestId, key, model, body } = input;
+  // Fast path only: the hold's unique `requestId` is the atomic claim (A2).
   if (await Requests.exists({ requestId })) {
     throw new AppError('invalid_request', { message: 'X-Request-Id was already used' });
   }
-
-  await assertUnderDailyCap(ctx, key);
 
   const pricing = {
     inPrice: model.pricing.inputPerMTokMicroUsdc,
@@ -202,14 +211,17 @@ export async function openHold(ctx: AppContext, input: CompletionInput): Promise
   };
   const estimate = applyDiscount(
     estimateHoldMicro({
-      promptTokens: countMessages(body.messages),
+      promptTokens: countPrompt(body),
       maxTokens: input.maxTokens,
       ...pricing,
     }),
     input.discountBps,
   );
   // `hold` needs a positive amount; a free model still reserves one micro-USDC.
-  const { holdId } = await hold(key.userId, estimate > 0n ? estimate : 1n, { requestId });
+  const { holdId } = await hold(key.userId, estimate > 0n ? estimate : 1n, {
+    requestId,
+    dailyCap: dailyCapOf(ctx, key),
+  });
   return { holdId, estimate, pricing, discountBps: input.discountBps };
 }
 
@@ -250,11 +262,43 @@ export async function completeChat(
   ctx: AppContext,
   input: CompletionInput,
 ): Promise<CompletionResult> {
-  const { requestId, key, model, body } = input;
   const held = await openHold(ctx, input);
+  try {
+    return await forwardAndBill(ctx, input, held);
+  } catch (err) {
+    await releaseAbandoned(ctx, input.requestId, held);
+    throw err;
+  }
+}
 
+/**
+ * Last resort when an error escapes the gateway: releases a hold that neither
+ * a capture nor a release closed. A no-op once the hold is closed.
+ */
+export async function releaseAbandoned(
+  ctx: AppContext,
+  requestId: string,
+  held: OpenHold,
+): Promise<void> {
+  try {
+    const { released } = await release(held.holdId);
+    if (released) ctx.logger.warn({ requestId }, 'released a hold abandoned by an error');
+  } catch (err) {
+    ctx.logger.error(
+      { requestId, errName: err instanceof Error ? err.name : 'unknown' },
+      'could not release an abandoned hold; hold expiry will',
+    );
+  }
+}
+
+async function forwardAndBill(
+  ctx: AppContext,
+  input: CompletionInput,
+  held: OpenHold,
+): Promise<CompletionResult> {
+  const { requestId, key, model, body } = input;
   const started = performance.now();
-  const outcome = await callUpstream(ctx, model, body);
+  const outcome = await callUpstream(ctx, input);
   const record = {
     requestId,
     apiKeyId: key.apiKeyId,

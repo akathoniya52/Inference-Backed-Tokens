@@ -1,13 +1,16 @@
 import { randomBytes } from 'node:crypto';
 
-import { Nonces, Users } from '@ibt/db';
+import { Nonces, Users, type Types } from '@ibt/db';
 import {
   AppError,
+  JWT_AUDIENCE,
+  JWT_ISSUER,
   JWT_TTL_S,
   JwtClaimsSchema,
   NONCE_TTL_MS,
   buildSignInMessage,
   signInChainId,
+  type JwtClaims,
   type NonceResponse,
   type User,
 } from '@ibt/shared';
@@ -50,14 +53,19 @@ export async function issueNonce(ctx: AppContext, wallet: string): Promise<Nonce
   return { nonce, message };
 }
 
-async function consumeNonce(wallet: string, nonce: string | undefined) {
-  // findOneAndDelete makes the nonce single-use even under concurrent verifies.
-  return Nonces.findOneAndDelete(nonce === undefined ? { wallet } : { wallet, nonce }, {
-    sort: { expiresAt: -1 },
-  }).lean();
+async function findNonce(wallet: string, nonce: string) {
+  return Nonces.findOne({ wallet, nonce }).lean();
 }
 
-async function upsertUser(ctx: AppContext, wallet: string): Promise<User> {
+/** Atomic, so the nonce is single-use even under concurrent verifies. */
+async function consumeNonce(id: Types.ObjectId): Promise<boolean> {
+  return (await Nonces.findOneAndDelete({ _id: id }).lean()) !== null;
+}
+
+async function upsertUser(
+  ctx: AppContext,
+  wallet: string,
+): Promise<{ user: User; tokenVersion: number }> {
   for (let attempt = 1; ; attempt += 1) {
     try {
       const user = await Users.findOneAndUpdate(
@@ -68,7 +76,10 @@ async function upsertUser(ctx: AppContext, wallet: string): Promise<User> {
         },
         { upsert: true, new: true },
       ).lean();
-      return { id: user._id.toString(), wallet: user.wallet, role: user.role };
+      return {
+        user: { id: user._id.toString(), wallet: user.wallet, role: user.role },
+        tokenVersion: user.tokenVersion ?? 0,
+      };
     } catch (err) {
       // A concurrent first sign-in or a depositRef collision; the retry reads or re-rolls.
       if (!isDuplicateKey(err) || attempt >= UPSERT_ATTEMPTS) throw err;
@@ -76,20 +87,35 @@ async function upsertUser(ctx: AppContext, wallet: string): Promise<User> {
   }
 }
 
-export async function signJwt(ctx: AppContext, user: AuthUser): Promise<string> {
+export async function signJwt(
+  ctx: AppContext,
+  user: AuthUser,
+  tokenVersion: number,
+): Promise<string> {
   const now = Math.floor(ctx.clock().getTime() / 1000);
-  return new SignJWT({ userId: user.userId, wallet: user.wallet, role: user.role })
+  const claims: JwtClaims = {
+    userId: user.userId,
+    wallet: user.wallet,
+    role: user.role,
+    ver: tokenVersion,
+  };
+  return new SignJWT(claims)
     .setProtectedHeader({ alg: JWT_ALG })
+    .setIssuer(JWT_ISSUER)
+    .setAudience(JWT_AUDIENCE)
     .setSubject(user.userId)
     .setIssuedAt(now)
     .setExpirationTime(now + JWT_TTL_S)
     .sign(jwtKey(ctx));
 }
 
-export async function verifyJwt(ctx: AppContext, token: string): Promise<AuthUser> {
+async function verifiedClaims(ctx: AppContext, token: string): Promise<JwtClaims> {
   try {
     const { payload } = await jwtVerify(token, jwtKey(ctx), {
       algorithms: [JWT_ALG],
+      issuer: JWT_ISSUER,
+      audience: JWT_AUDIENCE,
+      requiredClaims: ['iss', 'aud', 'sub'],
       currentDate: ctx.clock(),
     });
     const claims = JwtClaimsSchema.parse(payload);
@@ -100,19 +126,38 @@ export async function verifyJwt(ctx: AppContext, token: string): Promise<AuthUse
   }
 }
 
+/** Signature and claims, then the user's current `tokenVersion` so logout revokes the token. */
+export async function verifyJwt(ctx: AppContext, token: string): Promise<AuthUser> {
+  const claims = await verifiedClaims(ctx, token);
+  const user = await Users.findById(claims.userId, { wallet: 1, tokenVersion: 1 }).lean();
+  if (!user || user.wallet !== claims.wallet || (claims.ver ?? 0) !== (user.tokenVersion ?? 0)) {
+    throw new AppError('unauthorized', { message: 'session revoked' });
+  }
+  return { userId: claims.userId, wallet: claims.wallet, role: claims.role };
+}
+
+/** Revokes every JWT issued to the user so far. */
+export async function revokeSessions(userId: string): Promise<void> {
+  await Users.updateOne({ _id: userId }, { $inc: { tokenVersion: 1 } });
+}
+
 export interface VerifyInput {
   wallet: string;
-  nonce?: string | undefined;
+  nonce: string;
   signature: string;
 }
 
-/** Ed25519 check over the exact message issued with the nonce, then a 24 h JWT. */
+/**
+ * Ed25519 check over the exact message issued with the nonce, then a 24 h JWT.
+ * The nonce is only consumed after the signature checks out, so a forged verify
+ * cannot burn another wallet's nonce.
+ */
 export async function verifySignIn(
   ctx: AppContext,
   input: VerifyInput,
 ): Promise<{ token: string; user: User }> {
   const unauthorized = (message: string) => new AppError('unauthorized', { message });
-  const stored = await consumeNonce(input.wallet, input.nonce);
+  const stored = await findNonce(input.wallet, input.nonce);
   if (!stored) throw unauthorized('unknown or used nonce');
   if (stored.expiresAt.getTime() <= ctx.clock().getTime()) throw unauthorized('nonce expired');
 
@@ -129,8 +174,13 @@ export async function verifySignIn(
     publicKey?.length === nacl.sign.publicKeyLength &&
     nacl.sign.detached.verify(new TextEncoder().encode(message), signature, publicKey);
   if (!valid) throw unauthorized('signature does not match wallet');
+  if (!(await consumeNonce(stored._id))) throw unauthorized('unknown or used nonce');
 
-  const user = await upsertUser(ctx, input.wallet);
-  const token = await signJwt(ctx, { userId: user.id, wallet: user.wallet, role: user.role });
+  const { user, tokenVersion } = await upsertUser(ctx, input.wallet);
+  const token = await signJwt(
+    ctx,
+    { userId: user.id, wallet: user.wallet, role: user.role },
+    tokenVersion,
+  );
   return { token, user };
 }

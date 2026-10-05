@@ -70,6 +70,11 @@ const fields = z.object({
   JUPITER_PRICE_URL: z.url().optional(),
   JUPITER_API_KEY: optionalString,
   MOCK_UPSTREAM_PORT: z.coerce.number().int().min(0).max(65_535).optional(),
+  /** Lets provider upstreams resolve to loopback/private addresses (mock-upstream); dev and tests only. */
+  ALLOW_PRIVATE_UPSTREAMS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
 
   TELEGRAM_BOT_TOKEN: optionalString,
   TELEGRAM_CHAT_ID: optionalString,
@@ -93,6 +98,13 @@ export const envSchema = z
     fields,
   )
   .superRefine((env, ctx) => {
+    if (env.ALLOW_PRIVATE_UPSTREAMS && env.CLUSTER === 'mainnet-beta') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['ALLOW_PRIVATE_UPSTREAMS'],
+        message: 'private upstreams are refused on mainnet',
+      });
+    }
     if (env.CHAIN_MODE !== 'fake') return;
     if (env.CLUSTER === 'mainnet-beta') {
       ctx.addIssue({ code: 'custom', path: ['CHAIN_MODE'], message: 'fake is refused on mainnet' });

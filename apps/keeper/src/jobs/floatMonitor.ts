@@ -24,7 +24,7 @@ export interface FloatMonitor {
  */
 export async function expectedPayoutMicro(ctx: Pick<KeeperCtx, 'config'>): Promise<bigint> {
   const pending = await Requests.aggregate<{ _id: Types.ObjectId; total: bigint | number }>([
-    { $match: { status: 'success', settlementId: null } },
+    { $match: { settlementId: null, costMicroUsdc: { $gt: 0 } } },
     { $group: { _id: '$modelId', total: { $sum: '$costMicroUsdc' } } },
   ]);
   const revenue = new Map(pending.map((row) => [row._id.toHexString(), toBigInt(row.total)]));

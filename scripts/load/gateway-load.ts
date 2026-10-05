@@ -150,6 +150,7 @@ export function apiEnv(cfg: LoadConfig, masterKey: string): Record<string, strin
     RATE_LIMIT_PER_MIN,
     DAILY_CAP_USDC,
     MOCK_UPSTREAM_PORT: String(cfg.mockPort),
+    ALLOW_PRIVATE_UPSTREAMS: 'true',
     LOG_LEVEL: cfg.logLevel,
   };
 }

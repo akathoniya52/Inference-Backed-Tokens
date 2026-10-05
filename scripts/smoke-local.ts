@@ -358,6 +358,7 @@ async function smoke(): Promise<void> {
     LOG_LEVEL: 'warn',
     PORT: String(apiPort),
     MOCK_UPSTREAM_PORT: String(mockPort),
+    ALLOW_PRIVATE_UPSTREAMS: 'true',
   };
   const keeperEnv: NodeJS.ProcessEnv = {
     ...apiEnv,

@@ -3,11 +3,16 @@ import { Router } from 'express';
 
 import type { AppContext } from '../../app.js';
 import { adminAuth } from '../../middleware/adminAuth.js';
+import { createRateLimit } from '../../middleware/rateLimit.js';
 import { parseInput } from '../../validate.js';
 import { floatStatus, pauseModel, retrySettlement, runAllHealthChecks } from './service.js';
 
+const ADMIN_LIMIT_PER_MIN = 30;
+
 export function adminRouter(ctx: AppContext): Router {
   const router = Router();
+  // Ahead of adminAuth so failed token guesses count too.
+  router.use(createRateLimit({ limit: ADMIN_LIMIT_PER_MIN }));
   router.use(adminAuth(ctx));
 
   router.post('/settlements/:id/retry', async (req, res) => {

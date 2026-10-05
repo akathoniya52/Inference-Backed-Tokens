@@ -10,8 +10,12 @@ import {
 } from '../constants.js';
 
 function base58OfLength(bytes: number, label: string) {
+  // Longest base58 text of `bytes` bytes (44 for a key, 88 for a signature),
+  // checked first and aborting, so oversized input never reaches the decoder.
+  const maxChars = Math.ceil((bytes * Math.log(256)) / Math.log(58));
   return z
     .string()
+    .max(maxChars, { message: `${label} must be at most ${maxChars} characters`, abort: true })
     .regex(/^[1-9A-HJ-NP-Za-km-z]+$/, `${label} must be base58`)
     .refine((value) => bs58.decodeUnsafe(value)?.length === bytes, {
       message: `${label} must decode to ${bytes} bytes`,

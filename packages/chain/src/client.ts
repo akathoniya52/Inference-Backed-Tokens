@@ -79,6 +79,16 @@ export interface AddAndLockResult extends PositionKeys {
 
 export type SignatureState = 'landed' | 'failed' | 'unknown';
 
+/**
+ * Final status of a tx whose blockhash expired: `absent` means the node's history covers
+ * the tx's whole validity window and has no record of it; `unknown` means it cannot tell
+ * (expiry not finalized yet, status not finalized, or history pruned), so never resend.
+ */
+export type ExpiredSignatureState = 'landed' | 'failed' | 'absent' | 'unknown';
+
+/** Blocks a blockhash stays valid for (web3.js `lastValidBlockHeight` = its height + 150). */
+export const BLOCKHASH_VALIDITY_BLOCKS = 150;
+
 export interface PoolQuoteInput {
   /** `buy` spends `amount` lamports; `sell` spends `amount` token base units. */
   side: 'buy' | 'sell';
@@ -138,6 +148,11 @@ export interface ChainClient {
     opts?: SendOpts,
   ): Promise<TxResult>;
   signatureStatus(signature: string): Promise<SignatureState>;
+  /** Re-check for a tx past `lastValidBlockHeight`, against finalized state and full history. */
+  expiredSignatureStatus(
+    signature: string,
+    lastValidBlockHeight: number,
+  ): Promise<ExpiredSignatureState>;
   quoteCurve(pool: PublicKey, input: PoolQuoteInput): Promise<PoolQuote>;
   quoteDamm(mint: PublicKey, input: PoolQuoteInput): Promise<PoolQuote>;
 }
@@ -432,5 +447,29 @@ export class RealChainClient implements ChainClient {
     const status = value[0];
     if (!status) return 'unknown';
     return status.err === null ? 'landed' : 'failed';
+  }
+
+  /**
+   * All three reads go to the primary so the ledger range and the status come from the
+   * same node. A tx valid until `lastValidBlockHeight` can only land in a slot above
+   * `lastValidBlockHeight - 150` (a slot is never below its block height), so a node
+   * whose ledger starts at or before that slot would have it if it landed.
+   */
+  async expiredSignatureStatus(
+    signature: string,
+    lastValidBlockHeight: number,
+  ): Promise<ExpiredSignatureState> {
+    const conn = this.rpc.primary;
+    if ((await conn.getBlockHeight('finalized')) <= lastValidBlockHeight) return 'unknown';
+    const { value } = await conn.getSignatureStatuses([signature], {
+      searchTransactionHistory: true,
+    });
+    const status = value[0];
+    if (status) {
+      if (status.confirmationStatus !== 'finalized') return 'unknown';
+      return status.err === null ? 'landed' : 'failed';
+    }
+    const firstSlot = await conn.getMinimumLedgerSlot();
+    return firstSlot <= lastValidBlockHeight - 2 * BLOCKHASH_VALIDITY_BLOCKS ? 'absent' : 'unknown';
   }
 }

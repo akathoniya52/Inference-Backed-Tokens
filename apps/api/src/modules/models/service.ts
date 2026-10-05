@@ -164,6 +164,16 @@ function buildPatch(ctx: AppContext, row: ModelRow, patch: UpdateModelRequest) {
   if (patch.description !== undefined) set.description = patch.description;
   if (patch.imageUrl !== undefined) set.imageUrl = patch.imageUrl;
   const upstream = patch.upstream ?? {};
+  // A new endpoint never receives the stored key: whoever moves it re-supplies one.
+  if (
+    upstream.baseUrl !== undefined &&
+    upstream.baseUrl !== row.upstream.baseUrl &&
+    upstream.apiKey === undefined
+  ) {
+    throw new AppError('invalid_request', {
+      message: 'changing upstream.baseUrl requires upstream.apiKey',
+    });
+  }
   if (upstream.baseUrl !== undefined) set['upstream.baseUrl'] = upstream.baseUrl;
   if (upstream.modelName !== undefined) set['upstream.modelName'] = upstream.modelName;
   if (upstream.supportsStreamUsage !== undefined) {

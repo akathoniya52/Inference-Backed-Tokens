@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { loadEnv } from '../src/env.js';
+import { loopbackAllowlistBehindProxy } from '../src/middleware/adminAuth.js';
 
 const WALLET = '11111111111111111111111111111111';
 
@@ -29,6 +30,7 @@ describe('api env', () => {
     expect(env.DAILY_CAP_USDC).toBeUndefined();
     expect(env.ADMIN_IP_ALLOWLIST).toEqual([]);
     expect(env.JUPITER_API_KEY).toBeUndefined();
+    expect(env.ALLOW_PRIVATE_UPSTREAMS).toBe(false);
   });
 
   it('parses the optional overrides', () => {
@@ -86,6 +88,21 @@ describe('api env', () => {
     ).toThrow('CHAIN_MODE');
   });
 
+  it('parses ALLOW_PRIVATE_UPSTREAMS and refuses it on mainnet', () => {
+    expect(loadEnv({ ...base, ALLOW_PRIVATE_UPSTREAMS: 'true' }).ALLOW_PRIVATE_UPSTREAMS).toBe(
+      true,
+    );
+    expect(loadEnv({ ...base, ALLOW_PRIVATE_UPSTREAMS: 'false' }).ALLOW_PRIVATE_UPSTREAMS).toBe(
+      false,
+    );
+    expect(() => loadEnv({ ...base, ALLOW_PRIVATE_UPSTREAMS: '1' })).toThrow(
+      'ALLOW_PRIVATE_UPSTREAMS',
+    );
+    expect(() =>
+      loadEnv({ ...base, CLUSTER: 'mainnet-beta', ALLOW_PRIVATE_UPSTREAMS: 'true' }),
+    ).toThrow('ALLOW_PRIVATE_UPSTREAMS');
+  });
+
   it('rejects missing or malformed required values without echoing them', () => {
     const { JWT_SECRET: _jwt, ...rest } = base;
     expect(() => loadEnv(rest)).toThrow('JWT_SECRET');
@@ -95,5 +112,23 @@ describe('api env', () => {
     } catch (err) {
       expect(String(err)).not.toContain('too-short-key');
     }
+  });
+});
+
+describe('loopbackAllowlistBehindProxy (startup warning)', () => {
+  const flagged = (extra: Record<string, string>) =>
+    loopbackAllowlistBehindProxy(loadEnv({ ...base, ...extra }));
+
+  it('flags a loopback-only allowlist while trust proxy is on (the default)', () => {
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '127.0.0.1' })).toBe(true);
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '127.0.0.1, ::1, ::ffff:127.0.0.1' })).toBe(true);
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '::1', TRUST_PROXY: 'true' })).toBe(true);
+  });
+
+  it('stays quiet without trust proxy, with no allowlist, or with a non-loopback entry', () => {
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '127.0.0.1', TRUST_PROXY: 'false' })).toBe(false);
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '127.0.0.1', TRUST_PROXY: '0' })).toBe(false);
+    expect(flagged({})).toBe(false);
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '127.0.0.1, 10.0.0.5' })).toBe(false);
   });
 });

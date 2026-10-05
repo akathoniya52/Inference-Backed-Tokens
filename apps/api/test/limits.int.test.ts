@@ -1,11 +1,18 @@
-import { Models, Requests, Types, adjust } from '@ibt/db';
+import { Models, Requests, Types, Users, adjust } from '@ibt/db';
 import { createMockUpstream, type MockUpstream } from '@ibt/mock-upstream';
-import { MeResponseSchema, RATE_LIMIT_PER_MIN, usdcStringToMicro } from '@ibt/shared';
+import {
+  DEFAULT_MAX_TOKENS,
+  MeResponseSchema,
+  RATE_LIMIT_PER_MIN,
+  estimateHoldMicro,
+  usdcStringToMicro,
+} from '@ibt/shared';
 import { encrypt } from '@ibt/shared/node';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadEnv } from '../src/env.js';
+import { countMessages } from '../src/modules/gateway/tokenCount.js';
 import {
   bearer,
   createApiKey,
@@ -19,6 +26,13 @@ import {
 
 /** 0.1 USDC per prompt token, free output: each call costs a few tenths of a USDC. */
 const IN_PRICE = 100_000_000_000n;
+/** Hold estimate of one `chat` call: its prompt tokens at `IN_PRICE`. */
+const HI_ESTIMATE = estimateHoldMicro({
+  promptTokens: countMessages([{ role: 'user', content: 'Hi there' }]),
+  maxTokens: DEFAULT_MAX_TOKENS,
+  inPrice: IN_PRICE,
+  outPrice: 0n,
+});
 
 describe('gateway limits: per-key rate limit and daily cap', () => {
   let t: TestApp;
@@ -75,7 +89,8 @@ describe('gateway limits: per-key rate limit and daily cap', () => {
         modelName: 'upstream',
         apiKeyEnc: encrypt('mock-key', small.env.MASTER_KEY),
       },
-      pricing: { inputPerMTokMicroUsdc: IN_PRICE, outputPerMTokMicroUsdc: 0n },
+      // A quarter of the price, so one call's hold estimate fits under the 0.5 cap.
+      pricing: { inputPerMTokMicroUsdc: IN_PRICE / 4n, outputPerMTokMicroUsdc: 0n },
     });
   });
 
@@ -128,15 +143,34 @@ describe('gateway limits: per-key rate limit and daily cap', () => {
       code: 'daily_cap_exceeded',
       dailyCapUsdc: '1.000000',
     });
-    expect(costs.length).toBeGreaterThanOrEqual(2);
+    // A6: a call is refused once spend plus its own hold estimate would pass
+    // the cap, so the cap is never overshot.
+    expect(costs.length).toBeGreaterThanOrEqual(1);
     const total = costs.reduce((sum, cost) => sum + cost, 0n);
-    const beforeLast = total - (costs.at(-1) ?? 0n);
-    expect(total).toBeGreaterThanOrEqual(1_000_000n);
-    expect(beforeLast).toBeLessThan(1_000_000n);
+    expect(total).toBeLessThanOrEqual(1_000_000n);
+    expect(total + HI_ESTIMATE).toBeGreaterThan(1_000_000n);
     // Rejected before the hold, so the capped call left no request doc.
     expect(await Requests.countDocuments({ apiKeyId: new Types.ObjectId(k.id) })).toBe(
       costs.length,
     );
+  });
+
+  it('concurrent requests near the cap never overshoot it (A6)', async () => {
+    const k = await fundedKey(t, '2');
+    const results = await Promise.all(Array.from({ length: 10 }, () => chat(t, k.key)));
+
+    const ok = results.filter((res) => res.status === 200);
+    expect(ok.length).toBeGreaterThanOrEqual(1);
+    for (const res of results.filter((r) => r.status !== 200)) {
+      expect(res.status).toBe(429);
+      expect(errorOf(res).code).toBe('daily_cap_exceeded');
+    }
+    const docs = await Requests.find({ apiKeyId: new Types.ObjectId(k.id) }).lean();
+    expect(docs).toHaveLength(ok.length);
+    const spent = docs.reduce((sum, doc) => sum + doc.costMicroUsdc, 0n);
+    expect(spent).toBeLessThanOrEqual(2_000_000n);
+    const user = await Users.findById(k.userId).lean();
+    expect(user?.heldMicroUsdc).toBe(0n);
   });
 
   it('only counts spend from the current UTC day, and only for that key', async () => {

@@ -112,6 +112,8 @@ export function testEnvSource(mongoUri: string): Record<string, string> {
     ADMIN_TOKEN: randomBytes(32).toString('base64'),
     WEB_ORIGIN: 'http://localhost:5173',
     LOG_LEVEL: 'silent',
+    // Tests reach mock upstreams on 127.0.0.1.
+    ALLOW_PRIVATE_UPSTREAMS: 'true',
   };
 }
 

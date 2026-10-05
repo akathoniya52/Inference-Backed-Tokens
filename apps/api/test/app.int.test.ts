@@ -1,6 +1,6 @@
 import { AppError } from '@ibt/shared';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { errorOf, makeTestApp, type TestApp } from './helpers.js';
 
@@ -57,6 +57,29 @@ describe('app factory', () => {
     const res = await request(t.app).get('/readyz');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, mongo: true, chain: true });
+  });
+
+  it('GET /readyz shares one probe for 5 s, then probes again', async () => {
+    t.clock.advance(5_000);
+    expect((await request(t.app).get('/readyz')).status).toBe(200);
+    const ping = vi.spyOn(t.chain, 'ping').mockResolvedValue(false);
+    try {
+      t.clock.advance(4_999);
+      expect((await request(t.app).get('/readyz')).status).toBe(200);
+      expect(ping).not.toHaveBeenCalled();
+
+      t.clock.advance(1);
+      const [down, concurrent] = await Promise.all([
+        request(t.app).get('/readyz'),
+        request(t.app).get('/readyz'),
+      ]);
+      expect(down.status).toBe(503);
+      expect(down.body).toEqual({ ok: false, mongo: true, chain: false });
+      expect(concurrent.body).toEqual(down.body);
+      expect(ping).toHaveBeenCalledTimes(1);
+    } finally {
+      ping.mockRestore();
+    }
   });
 
   it('unknown routes return a 404 envelope', async () => {

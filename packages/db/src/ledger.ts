@@ -1,6 +1,7 @@
 import { AppError, HOLD_TTL_MS, microToUsdcString, type LedgerType } from '@ibt/shared';
 import { Types, type ClientSession } from 'mongoose';
 
+import { DailySpend } from './models/dailySpend.js';
 import { Ledger, type LedgerDoc } from './models/ledger.js';
 import { Requests, type RequestStatus } from './models/requests.js';
 import { Users, type UserDoc } from './models/users.js';
@@ -15,9 +16,19 @@ export const BALANCE_LEDGER_TYPES = Object.freeze([
   'adjust',
 ] as const satisfies readonly LedgerType[]);
 
+export interface DailyCapOptions {
+  apiKeyId: Id;
+  /** Start of the UTC day the spend counts against. */
+  day: Date;
+  capMicro: bigint;
+}
+
 export interface HoldOptions {
+  /** Unique across holds: a reused id fails with `invalid_request`. */
   requestId: string;
   expiresInMs?: number;
+  /** G21: reserve the estimate against the key's daily cap in the same transaction. */
+  dailyCap?: DailyCapOptions;
 }
 
 export interface Hold {
@@ -109,46 +120,156 @@ async function insertRequest(
   await Requests.create([{ ...record, userId, costMicroUsdc: costMicro }], { session });
 }
 
-/** Reserves `estimateMicro` iff `balance − held ≥ estimate` (G14), atomically. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** A `dailySpend` row outlives its day by more than any hold. */
+const DAILY_SPEND_TTL_MS = 2 * DAY_MS;
+
+function isDuplicateKey(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 11000;
+}
+
+function dailyCapExceeded(capMicro: bigint): AppError {
+  return new AppError('daily_cap_exceeded', {
+    details: { dailyCapUsdc: microToUsdcString(capMicro) },
+  });
+}
+
+/**
+ * Creates the key's `dailySpend` row for the day if missing, seeded with the
+ * spend already recorded in `requests` (rows written before the counter).
+ */
+async function ensureDailySpend(userId: Id, cap: DailyCapOptions): Promise<void> {
+  const apiKeyId = new Types.ObjectId(cap.apiKeyId);
+  if (await DailySpend.exists({ apiKeyId, day: cap.day })) return;
+  const [row] = await Requests.aggregate<{ spent: bigint | number }>([
+    {
+      $match: {
+        userId: new Types.ObjectId(userId),
+        createdAt: { $gte: cap.day, $lt: new Date(cap.day.getTime() + DAY_MS) },
+        apiKeyId,
+      },
+    },
+    { $group: { _id: null, spent: { $sum: '$costMicroUsdc' } } },
+  ]);
+  try {
+    await DailySpend.updateOne(
+      { apiKeyId, day: cap.day },
+      {
+        $setOnInsert: {
+          reservedMicroUsdc: row ? BigInt(row.spent) : 0n,
+          expiresAt: new Date(cap.day.getTime() + DAILY_SPEND_TTL_MS),
+        },
+      },
+      { upsert: true },
+    );
+  } catch (err) {
+    // A concurrent first request of the day created the row first.
+    if (!isDuplicateKey(err)) throw err;
+  }
+}
+
+/** Adds `estimateMicro` to the day's reservation iff it stays within the cap. */
+async function reserveDailyCap(
+  cap: DailyCapOptions,
+  estimateMicro: bigint,
+  session: ClientSession,
+): Promise<void> {
+  const reserved = await DailySpend.findOneAndUpdate(
+    {
+      apiKeyId: new Types.ObjectId(cap.apiKeyId),
+      day: cap.day,
+      $expr: { $lte: [{ $add: ['$reservedMicroUsdc', estimateMicro] }, cap.capMicro] },
+    },
+    { $inc: { reservedMicroUsdc: estimateMicro } },
+    { new: true, session },
+  );
+  if (!reserved) throw dailyCapExceeded(cap.capMicro);
+}
+
+/** Moves a closed hold's daily reservation by `delta`; no-op for uncapped holds. */
+async function adjustDailyCap(
+  holdRow: LedgerDoc,
+  delta: bigint,
+  session: ClientSession,
+): Promise<void> {
+  if (!holdRow.dailyCap || delta === 0n) return;
+  await DailySpend.updateOne(
+    { apiKeyId: holdRow.dailyCap.apiKeyId, day: holdRow.dailyCap.day },
+    { $inc: { reservedMicroUsdc: delta } },
+    { session },
+  );
+}
+
+/**
+ * Reserves `estimateMicro` iff `balance − held ≥ estimate` (G14) and, with
+ * `dailyCap`, iff the key's day stays within its cap (G21), atomically. The
+ * hold row claims `requestId`; a second hold for the same id is rejected.
+ */
 export async function hold(userId: Id, estimateMicro: bigint, options: HoldOptions): Promise<Hold> {
   assertPositive(estimateMicro, 'estimateMicro');
   const expiresInMs = options.expiresInMs ?? HOLD_TTL_MS;
+  const { dailyCap } = options;
+  if (dailyCap) {
+    if (estimateMicro > dailyCap.capMicro) throw dailyCapExceeded(dailyCap.capMicro);
+    await ensureDailySpend(userId, dailyCap);
+  }
 
-  return withTransaction(async (session) => {
-    const user = await Users.findOneAndUpdate(
-      {
-        _id: userId,
-        $expr: {
-          $gte: [{ $subtract: ['$balanceMicroUsdc', '$heldMicroUsdc'] }, estimateMicro],
-        },
-      },
-      { $inc: { heldMicroUsdc: estimateMicro } },
-      { new: true, session },
+  try {
+    return await withTransaction((session) =>
+      openHoldRow(userId, estimateMicro, options, expiresInMs, session),
     );
-    if (!user) {
-      const current = await Users.findById(userId, null, { session });
-      if (!current) throw userNotFound(userId);
-      const shortfall = estimateMicro - (current.balanceMicroUsdc - current.heldMicroUsdc);
-      throw new AppError('insufficient_credits', {
-        details: { shortfallUsdc: microToUsdcString(shortfall) },
-      });
-    }
+  } catch (err) {
+    if (!isDuplicateKey(err)) throw err;
+    throw new AppError('invalid_request', { message: 'X-Request-Id was already used' });
+  }
+}
 
-    const expiresAt = new Date(Date.now() + expiresInMs);
-    const entry = await insertEntry(
-      {
-        userId: user._id,
-        type: 'hold',
-        status: 'open',
-        amountMicroUsdc: -estimateMicro,
-        ref: { requestId: options.requestId },
-        balanceAfterMicroUsdc: user.balanceMicroUsdc,
-        expiresAt,
+async function openHoldRow(
+  userId: Id,
+  estimateMicro: bigint,
+  options: HoldOptions,
+  expiresInMs: number,
+  session: ClientSession,
+): Promise<Hold> {
+  const { dailyCap } = options;
+  if (dailyCap) await reserveDailyCap(dailyCap, estimateMicro, session);
+
+  const user = await Users.findOneAndUpdate(
+    {
+      _id: userId,
+      $expr: {
+        $gte: [{ $subtract: ['$balanceMicroUsdc', '$heldMicroUsdc'] }, estimateMicro],
       },
-      session,
-    );
-    return { holdId: entry._id, userId: user._id, estimateMicro, expiresAt };
-  });
+    },
+    { $inc: { heldMicroUsdc: estimateMicro } },
+    { new: true, session },
+  );
+  if (!user) {
+    const current = await Users.findById(userId, null, { session });
+    if (!current) throw userNotFound(userId);
+    const shortfall = estimateMicro - (current.balanceMicroUsdc - current.heldMicroUsdc);
+    throw new AppError('insufficient_credits', {
+      details: { shortfallUsdc: microToUsdcString(shortfall) },
+    });
+  }
+
+  const expiresAt = new Date(Date.now() + expiresInMs);
+  const entry = await insertEntry(
+    {
+      userId: user._id,
+      type: 'hold',
+      status: 'open',
+      amountMicroUsdc: -estimateMicro,
+      ref: { requestId: options.requestId },
+      balanceAfterMicroUsdc: user.balanceMicroUsdc,
+      expiresAt,
+      ...(dailyCap
+        ? { dailyCap: { apiKeyId: new Types.ObjectId(dailyCap.apiKeyId), day: dailyCap.day } }
+        : {}),
+    },
+    session,
+  );
+  return { holdId: entry._id, userId: user._id, estimateMicro, expiresAt };
 }
 
 async function findHold(holdId: Id, session: ClientSession): Promise<LedgerDoc> {
@@ -195,6 +316,8 @@ export async function capture(
       { balanceMicroUsdc: -costMicro, heldMicroUsdc: closed.amountMicroUsdc },
       session,
     );
+    // The reservation shrinks from the estimate to the billed cost.
+    await adjustDailyCap(closed, costMicro + closed.amountMicroUsdc, session);
     const entry = await insertEntry(
       {
         userId: user._id,
@@ -225,6 +348,7 @@ async function closeHold(
 
   const estimateMicro = -closed.amountMicroUsdc;
   const user = await incUser(closed.userId, { heldMicroUsdc: -estimateMicro }, session);
+  await adjustDailyCap(closed, -estimateMicro, session);
   await insertEntry(
     {
       userId: user._id,

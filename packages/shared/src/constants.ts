@@ -84,11 +84,21 @@ export const FIRST_BYTE_TIMEOUT_MS = 30_000;
 export const TOTAL_TIMEOUT_MS = 300_000;
 export const BODY_LIMIT_BYTES = 1024 * 1024;
 export const DAILY_CAP_DEFAULT_MICRO = 50_000_000n;
+// Prompt size before tiktoken runs: characters of every counted string, in
+// total and per string (media part payloads are not counted).
+export const MAX_PROMPT_CHARS = 256 * 1024;
+export const MAX_PROMPT_STRING_CHARS = 64 * 1024;
+// Hold surcharge per non-text content part; tiktoken cannot size these.
+export const IMAGE_PART_HOLD_TOKENS = 2_048;
+export const AUDIO_PART_HOLD_TOKENS = 8_192;
+export const FILE_PART_HOLD_TOKENS = 8_192;
 
 // Lifetimes (L223, L148, L520, G13, G15).
 export const HOLD_TTL_MS = 600_000;
 export const NONCE_TTL_MS = 300_000;
 export const JWT_TTL_S = 86_400;
+export const JWT_ISSUER = 'ibt-api';
+export const JWT_AUDIENCE = 'ibt-web';
 export const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Settlement (L176) and health checks (L250).

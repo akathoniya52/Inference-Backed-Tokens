@@ -8,6 +8,7 @@ import type {
   AddAndLockInput,
   AddAndLockResult,
   ChainClient,
+  ExpiredSignatureState,
   PoolQuote,
   PoolQuoteInput,
   PositionKeys,
@@ -167,6 +168,7 @@ export class FakeChain implements ChainClient {
   private readonly crashAfterLanding = new Set<string>();
   private threshold = 10_000_000_000n;
   private blockHeight = 1000;
+  private historyAvailable = true;
   private hydrated: Promise<void> | null = null;
 
   constructor(opts: FakeChainOptions = {}) {
@@ -513,10 +515,29 @@ export class FakeChain implements ChainClient {
 
   async signatureStatus(signature: string): Promise<SignatureState> {
     this.record('signatureStatus', [signature]);
-    if (this.txs.some((tx) => tx.signature === signature)) return 'landed';
-    if (!this.mongo) return 'unknown';
-    const row = await this.mongo.collection(COLLECTION).findOne({ signature });
-    return isTxRow(row) ? 'landed' : 'unknown';
+    if (!this.historyAvailable) return 'unknown';
+    return (await this.hasLanded(signature)) ? 'landed' : 'unknown';
+  }
+
+  /** The fake chain keeps every landed tx, so a signature it never landed is `absent`. */
+  async expiredSignatureStatus(
+    signature: string,
+    lastValidBlockHeight: number,
+  ): Promise<ExpiredSignatureState> {
+    this.record('expiredSignatureStatus', [signature, lastValidBlockHeight]);
+    if (!this.historyAvailable) return 'unknown';
+    return (await this.hasLanded(signature)) ? 'landed' : 'absent';
+  }
+
+  /** `false` answers every status query `unknown`, like an RPC that pruned its history. */
+  setHistoryAvailable(available: boolean): void {
+    this.historyAvailable = available;
+  }
+
+  private async hasLanded(signature: string): Promise<boolean> {
+    if (this.txs.some((tx) => tx.signature === signature)) return true;
+    if (!this.mongo) return false;
+    return isTxRow(await this.mongo.collection(COLLECTION).findOne({ signature }));
   }
 
   /** Loads `fakeChainPools` once; pools already in memory win. */

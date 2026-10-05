@@ -1,9 +1,7 @@
-import { FakePriceSource } from '@ibt/chain';
 import type { FakeChainMethod } from '@ibt/chain/testing';
 import { Models, Settlements, type SettlementDoc, type Types } from '@ibt/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { systemClock } from '../src/ctx.js';
 import { createLease } from '../src/lease.js';
 import { runSettlement } from '../src/settlement/engine.js';
 import { createOrchestrator } from '../src/settlement/orchestrator.js';
@@ -249,7 +247,7 @@ describe('settlement suite (L589)', () => {
     expect(doc.state).toBe('done');
     expect(await landedMethods(doc)).toEqual(['transferUsdc', 'curveBuy']);
 
-    const leaseOpts = { name: `suite-${start.getTime()}`, clock: systemClock, logger: ctx.logger };
+    const leaseOpts = { name: `suite-${start.getTime()}`, logger: ctx.logger };
     const first = createLease({ ...leaseOpts, holder: 'keeper-a' });
     const second = createLease({ ...leaseOpts, holder: 'keeper-b' });
     try {
@@ -272,8 +270,9 @@ describe('settlement suite (L589)', () => {
 
   it('dust slice → carried over, no buy, done with phase none', async () => {
     const { model } = await createTestModel(ctx, 'curve');
-    const price = ctx.price;
-    ctx.price = new FakePriceSource(5_000_000_000);
+    // 0 lamports to spend: E5 now rejects the absurd price this test used to get dust from.
+    const cap = ctx.config.maxSliceLamports;
+    ctx.config.maxSliceLamports = 0n;
     try {
       const done = await runSettlement(ctx, await open(model._id, nextHour()));
       expect(done.state).toBe('done');
@@ -282,7 +281,7 @@ describe('settlement suite (L589)', () => {
       expect(await landedMethods(done)).toEqual(['transferUsdc']);
       expect((await token(model._id)).sliceCarryOverMicroUsdc).toBe(micro(2));
     } finally {
-      ctx.price = price;
+      ctx.config.maxSliceLamports = cap;
     }
   });
 

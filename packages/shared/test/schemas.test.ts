@@ -1,5 +1,5 @@
 import bs58 from 'bs58';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { z } from 'zod';
 
 import {
@@ -10,6 +10,7 @@ import {
   DepositRequestSchema,
   DepositResponseSchema,
   ErrorEnvelopeSchema,
+  JwtClaimsSchema,
   LaunchConfirmRequestSchema,
   LaunchConfirmResponseSchema,
   ModelSchema,
@@ -195,10 +196,46 @@ describe('platform requests', () => {
     expect(TxSignatureSchema.safeParse(MINT).success).toBe(false);
   });
 
+  it('caps base58 length before decoding', () => {
+    const maxKey = bs58.encode(new Uint8Array(32).fill(255));
+    const maxSig = bs58.encode(new Uint8Array(64).fill(255));
+    expect(maxKey).toHaveLength(44);
+    expect(maxSig).toHaveLength(88);
+    expect(PublicKeySchema.safeParse(maxKey).success).toBe(true);
+    expect(TxSignatureSchema.safeParse(maxSig).success).toBe(true);
+
+    const decode = vi.spyOn(bs58, 'decodeUnsafe');
+    try {
+      expect(PublicKeySchema.safeParse('1'.repeat(45)).success).toBe(false);
+      expect(TxSignatureSchema.safeParse('1'.repeat(89)).success).toBe(false);
+      expect(TxSignatureSchema.safeParse('z'.repeat(100_000)).success).toBe(false);
+      expect(decode).not.toHaveBeenCalled();
+    } finally {
+      decode.mockRestore();
+    }
+  });
+
   it('auth bodies', () => {
     expect(NonceRequestSchema.safeParse({ wallet: WALLET }).success).toBe(true);
     expect(NonceRequestSchema.safeParse({ wallet: 'nope' }).success).toBe(false);
-    expect(VerifyRequestSchema.safeParse({ wallet: WALLET, signature: sig(9) }).success).toBe(true);
+    const nonce = 'a'.repeat(32);
+    expect(
+      VerifyRequestSchema.safeParse({ wallet: WALLET, nonce, signature: sig(9) }).success,
+    ).toBe(true);
+    expect(VerifyRequestSchema.safeParse({ wallet: WALLET, signature: sig(9) }).success).toBe(
+      false,
+    );
+    expect(
+      VerifyRequestSchema.safeParse({ wallet: WALLET, nonce: 'a'.repeat(129), signature: sig(9) })
+        .success,
+    ).toBe(false);
+  });
+
+  it('jwt claims accept tokens with and without a version', () => {
+    const claims = { userId: MODEL_ID, wallet: WALLET, role: 'consumer' };
+    expect(JwtClaimsSchema.parse(claims)).toEqual(claims);
+    expect(JwtClaimsSchema.parse({ ...claims, ver: 3 })).toEqual({ ...claims, ver: 3 });
+    expect(JwtClaimsSchema.safeParse({ ...claims, ver: -1 }).success).toBe(false);
   });
 
   it('pagination coerces limit and caps it at 100', () => {
@@ -242,6 +279,58 @@ describe('platform requests', () => {
     expect(UpdateModelRequestSchema.safeParse({ status: 'paused' }).success).toBe(true);
     expect(UpdateModelRequestSchema.safeParse({ status: 'delisted' }).success).toBe(false);
     expect(UpdateModelRequestSchema.safeParse({}).success).toBe(false);
+  });
+
+  it('upstream baseUrl carries no credentials, query or fragment', () => {
+    const create = {
+      slug: 'mock-llm',
+      name: 'Mock',
+      upstream: { baseUrl: 'https://api.example.com/v1', modelName: 'm', apiKey: 'sk-test' },
+      pricing: { inputPerMTokUsdc: '0.2', outputPerMTokUsdc: '0.8' },
+    };
+    const withBaseUrl = (baseUrl: string) => ({
+      ...create,
+      upstream: { ...create.upstream, baseUrl },
+    });
+    expect(CreateModelRequestSchema.safeParse(create).success).toBe(true);
+    expect(
+      CreateModelRequestSchema.safeParse(withBaseUrl('https://api.example.com/v1/')).success,
+    ).toBe(true);
+    for (const bad of [
+      'https://user:pass@api.example.com/v1',
+      'https://user@api.example.com/v1',
+      'https://api.example.com/v1?x=1',
+      'https://api.example.com/v1?',
+      'https://api.example.com/v1#frag',
+      'https://api.example.com/v1#',
+    ]) {
+      expect(CreateModelRequestSchema.safeParse(withBaseUrl(bad)).success, bad).toBe(false);
+      expect(UpdateModelRequestSchema.safeParse({ upstream: { baseUrl: bad } }).success, bad).toBe(
+        false,
+      );
+    }
+  });
+
+  it('imageUrl must be https', () => {
+    const create = {
+      slug: 'mock-llm',
+      name: 'Mock',
+      upstream: { baseUrl: 'http://localhost:4010/v1', modelName: 'm', apiKey: 'sk-test' },
+      pricing: { inputPerMTokUsdc: '0.2', outputPerMTokUsdc: '0.8' },
+    };
+    const withImage = (imageUrl: string) => ({ ...create, imageUrl });
+    expect(CreateModelRequestSchema.safeParse(withImage('https://img.example/a.png')).success).toBe(
+      true,
+    );
+    for (const bad of [
+      'http://img.example/a.png',
+      'javascript:alert(1)',
+      'data:image/png;base64,AA',
+    ]) {
+      expect(CreateModelRequestSchema.safeParse(withImage(bad)).success, bad).toBe(false);
+      expect(UpdateModelRequestSchema.safeParse({ imageUrl: bad }).success, bad).toBe(false);
+    }
+    expect(UpdateModelRequestSchema.safeParse({ imageUrl: null }).success).toBe(true);
   });
 
   it('usage range and quote query', () => {

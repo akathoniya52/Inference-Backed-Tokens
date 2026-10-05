@@ -39,7 +39,7 @@ function walletState(state: Partial<WalletContextState>): WalletContextState {
 function message(forWallet = wallet) {
   return buildSignInMessage({
     uri: 'https://ibt.test',
-    chainId: 'devnet',
+    chainId: 'solana:devnet',
     wallet: forWallet,
     nonce,
     issuedAt: '2026-10-02T10:00:00.000Z',
@@ -132,9 +132,10 @@ describe('WalletGate', () => {
     expect(signIn).toHaveBeenCalledWith({
       domain: 'ibt.test',
       address: wallet,
+      statement: 'Sign in with your Solana account.',
       uri: 'https://ibt.test',
       version: '1',
-      chainId: 'devnet',
+      chainId: 'solana:devnet',
       nonce,
       issuedAt: '2026-10-02T10:00:00.000Z',
     });

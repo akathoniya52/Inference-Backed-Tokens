@@ -1,6 +1,7 @@
 import {
   buildSignInMessage,
   NonceResponseSchema,
+  SIGN_IN_STATEMENT,
   VerifyResponseSchema,
   type NonceRequest,
   type VerifyRequest,
@@ -32,12 +33,13 @@ export function useSessionWalletSync(): void {
 }
 
 const SIGN_IN_MESSAGE =
-  /^(.+) wants you to sign in with your Solana account:\n.+\n\nURI: (.+)\nVersion: 1\nChain ID: (.+)\nNonce: .+\nIssued At: (.+)$/;
+  /^(.+) wants you to sign in with your Solana account:\n.+\n\n.+\n\nURI: (.+)\nVersion: 1\nChain ID: (.+)\nNonce: .+\nIssued At: (.+)$/;
 
 /** The template's variable parts, in the shape the Wallet Standard `signIn` takes. */
 interface SignInFields {
   domain: string;
   address: string;
+  statement: string;
   uri: string;
   version: '1';
   chainId: string;
@@ -59,6 +61,7 @@ function expectedMessageFields(
   const fields: SignInFields = {
     domain,
     address: wallet,
+    statement: SIGN_IN_STATEMENT,
     uri,
     version: '1',
     chainId,

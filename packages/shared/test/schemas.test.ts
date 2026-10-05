@@ -308,12 +308,12 @@ describe('buildSignInMessage (G22)', () => {
         issuedAt: new Date('2026-10-02T01:02:03.000Z'),
       }),
     ).toBe(
-      `ibt.example wants you to sign in with your Solana account:\n${WALLET}\n\nURI: https://ibt.example\nVersion: 1\nChain ID: devnet\nNonce: abc12345\nIssued At: 2026-10-02T01:02:03.000Z`,
+      `ibt.example wants you to sign in with your Solana account:\n${WALLET}\n\nSign in with your Solana account.\n\nURI: https://ibt.example\nVersion: 1\nChain ID: solana:devnet\nNonce: abc12345\nIssued At: 2026-10-02T01:02:03.000Z`,
     );
   });
 
   it('maps clusters to SIWS chain ids', () => {
-    expect(signInChainId('devnet')).toBe('devnet');
-    expect(signInChainId('mainnet-beta')).toBe('mainnet');
+    expect(signInChainId('devnet')).toBe('solana:devnet');
+    expect(signInChainId('mainnet-beta')).toBe('solana:mainnet');
   });
 });

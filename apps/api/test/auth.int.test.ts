@@ -54,7 +54,9 @@ describe('auth', () => {
     expect(message).toContain(wallet);
     expect(message).toContain(`Nonce: ${n}`);
     expect(message.startsWith('localhost:5173 wants you to sign in')).toBe(true);
-    expect(message).toContain('\n\nURI: http://localhost:5173\nVersion: 1\nChain ID: devnet\n');
+    expect(message).toContain(
+      '\n\nSign in with your Solana account.\n\nURI: http://localhost:5173\nVersion: 1\nChain ID: solana:devnet\n',
+    );
 
     const res = await request(t.app)
       .post('/api/auth/verify')

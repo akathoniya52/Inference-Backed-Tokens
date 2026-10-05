@@ -15,6 +15,8 @@ concurrency:
 
 env:
   MONGOMS_VERSION: 7.0.14
+  # Type-aware ESLint across the monorepo needs ~2.2 GB of heap; Node's default limit is lower.
+  NODE_OPTIONS: --max-old-space-size=4096
 
 jobs:
   ci:

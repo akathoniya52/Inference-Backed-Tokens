@@ -6,7 +6,7 @@ import {
 } from '@ibt/shared';
 
 import { env } from '../env';
-import { formatCount, formatDecimal, formatPeriod, formatSol } from '../lib/format';
+import { formatCount, formatDecimal, formatPeriod, formatSol, shortAddress } from '../lib/format';
 import { useSettlements } from '../lib/queries';
 import { txUrl } from '../lib/solscan';
 import { EXTERNAL_LINK } from './ModelStats';
@@ -88,9 +88,10 @@ function SettlementRow({ settlement, cluster }: { settlement: Settlement; cluste
         {txs.length === 0 ? (
           <span className="text-ink-600">—</span>
         ) : (
-          <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+          <ul className="space-y-1 text-xs">
             {txs.map(({ label, signature }) => (
-              <li key={label}>
+              <li key={label} className="whitespace-nowrap">
+                <span className="text-ink-400">{label}</span>{' '}
                 <a
                   href={txUrl(signature, cluster)}
                   target="_blank"
@@ -99,7 +100,7 @@ function SettlementRow({ settlement, cluster }: { settlement: Settlement; cluste
                   aria-label={`${label} transaction`}
                   className={EXTERNAL_LINK}
                 >
-                  {label}
+                  {shortAddress(signature, 6)}
                 </a>
               </li>
             ))}

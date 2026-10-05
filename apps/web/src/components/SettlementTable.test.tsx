@@ -63,6 +63,8 @@ describe('SettlementTable', () => {
     const payout = await screen.findByRole('link', { name: 'Payout transaction' });
     expect(payout.getAttribute('href')).toBe(`https://solscan.io/tx/${PAYOUT_SIG}?cluster=devnet`);
     expect(payout.getAttribute('target')).toBe('_blank');
+    expect(payout.textContent).toBe(`${PAYOUT_SIG.slice(0, 6)}…${PAYOUT_SIG.slice(-6)}`);
+    expect(payout.getAttribute('title')).toBe(PAYOUT_SIG);
     expect(screen.getByRole('link', { name: 'Buy transaction' }).getAttribute('href')).toBe(
       `https://solscan.io/tx/${BUY_SIG}?cluster=devnet`,
     );

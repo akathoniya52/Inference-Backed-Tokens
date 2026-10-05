@@ -223,6 +223,7 @@ describe('mapSendTxError', () => {
       'insufficient_sol',
     ],
     [new Error('Transfer: insufficient lamports 10, need 20'), 'insufficient_sol'],
+    [new Error('Simulation failed: "AccountNotFound"'), 'insufficient_sol'],
     [new Error('Blockhash not found'), 'blockhash_expired'],
     [new Error('something odd'), 'unknown'],
   ])('maps %s', (error, code) => {

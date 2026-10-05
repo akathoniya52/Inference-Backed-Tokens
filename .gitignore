@@ -10,3 +10,4 @@ id.json
 *.tsbuildinfo
 apps/web/test-results
 apps/web/playwright-report
+*.env.production

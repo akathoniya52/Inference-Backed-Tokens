@@ -32,12 +32,15 @@ export function useSessionWalletSync(): void {
 }
 
 const SIGN_IN_MESSAGE =
-  /^(.+) wants you to sign in with your Solana account:\n.+\n\nNonce: .+\nIssued At: (.+)$/;
+  /^(.+) wants you to sign in with your Solana account:\n.+\n\nURI: (.+)\nVersion: 1\nChain ID: (.+)\nNonce: .+\nIssued At: (.+)$/;
 
 /** The template's variable parts, in the shape the Wallet Standard `signIn` takes. */
 interface SignInFields {
   domain: string;
   address: string;
+  uri: string;
+  version: '1';
+  chainId: string;
   nonce: string;
   issuedAt: string;
 }
@@ -51,15 +54,18 @@ function expectedMessageFields(
   wallet: string,
   nonce: string,
 ): SignInFields | null {
-  const match = SIGN_IN_MESSAGE.exec(message);
-  if (!match?.[1] || !match[2]) return null;
-  const fields = { domain: match[1], address: wallet, nonce, issuedAt: match[2] };
-  const expected = buildSignInMessage({
-    domain: fields.domain,
-    wallet,
+  const [, domain, uri, chainId, issuedAt] = SIGN_IN_MESSAGE.exec(message) ?? [];
+  if (!domain || !uri || !chainId || !issuedAt || !URL.canParse(uri)) return null;
+  const fields: SignInFields = {
+    domain,
+    address: wallet,
+    uri,
+    version: '1',
+    chainId,
     nonce,
-    issuedAt: fields.issuedAt,
-  });
+    issuedAt,
+  };
+  const expected = buildSignInMessage({ uri, chainId, wallet, nonce, issuedAt });
   return expected === message ? fields : null;
 }
 

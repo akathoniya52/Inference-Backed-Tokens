@@ -25,6 +25,7 @@ import {
   VerifyRequestSchema,
   buildSignInMessage,
   effectiveMaxTokens,
+  signInChainId,
   type ChatCompletionRequest,
 } from '../src/index.js';
 
@@ -297,16 +298,22 @@ describe('model DTO', () => {
 });
 
 describe('buildSignInMessage (G22)', () => {
-  it('renders the fixed template', () => {
+  it('renders the fixed template with the fields Phantom requires', () => {
     expect(
       buildSignInMessage({
-        domain: 'ibt.example',
+        uri: 'https://ibt.example',
+        chainId: signInChainId('devnet'),
         wallet: WALLET,
-        nonce: 'abc123',
+        nonce: 'abc12345',
         issuedAt: new Date('2026-10-02T01:02:03.000Z'),
       }),
     ).toBe(
-      `ibt.example wants you to sign in with your Solana account:\n${WALLET}\n\nNonce: abc123\nIssued At: 2026-10-02T01:02:03.000Z`,
+      `ibt.example wants you to sign in with your Solana account:\n${WALLET}\n\nURI: https://ibt.example\nVersion: 1\nChain ID: devnet\nNonce: abc12345\nIssued At: 2026-10-02T01:02:03.000Z`,
     );
+  });
+
+  it('maps clusters to SIWS chain ids', () => {
+    expect(signInChainId('devnet')).toBe('devnet');
+    expect(signInChainId('mainnet-beta')).toBe('mainnet');
   });
 });

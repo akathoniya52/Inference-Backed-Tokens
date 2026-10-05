@@ -47,6 +47,12 @@ describe('api env', () => {
     expect(loadEnv({ ...base, TRUST_PROXY: '2' }).TRUST_PROXY).toBe(2);
   });
 
+  it('normalizes WEB_ORIGIN to a bare origin', () => {
+    for (const raw of ['https://app.example.com/', 'https://app.example.com/some/path']) {
+      expect(loadEnv({ ...base, WEB_ORIGIN: raw }).WEB_ORIGIN).toBe('https://app.example.com');
+    }
+  });
+
   it.each(['TREASURY_SECRET_KEY', 'KEEPER_SECRET_KEY'])('rejects startup when %s is set', (key) => {
     const secret = 'super-secret-material';
     expect(() => loadEnv({ ...base, [key]: secret })).toThrow(key);

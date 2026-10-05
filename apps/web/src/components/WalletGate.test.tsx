@@ -38,7 +38,8 @@ function walletState(state: Partial<WalletContextState>): WalletContextState {
 
 function message(forWallet = wallet) {
   return buildSignInMessage({
-    domain: 'ibt.test',
+    uri: 'https://ibt.test',
+    chainId: 'devnet',
     wallet: forWallet,
     nonce,
     issuedAt: '2026-10-02T10:00:00.000Z',
@@ -131,6 +132,9 @@ describe('WalletGate', () => {
     expect(signIn).toHaveBeenCalledWith({
       domain: 'ibt.test',
       address: wallet,
+      uri: 'https://ibt.test',
+      version: '1',
+      chainId: 'devnet',
       nonce,
       issuedAt: '2026-10-02T10:00:00.000Z',
     });
@@ -142,7 +146,7 @@ describe('WalletGate', () => {
     const signIn = vi.fn(() =>
       Promise.resolve({
         account: { address: wallet, publicKey: owner.toBytes(), chains: [], features: [] },
-        signedMessage: new TextEncoder().encode(`${message()}\nVersion: 1`),
+        signedMessage: new TextEncoder().encode(`${message()}\nRequest ID: 1`),
         signature: signatureBytes,
       }),
     );

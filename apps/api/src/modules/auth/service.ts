@@ -7,6 +7,7 @@ import {
   JwtClaimsSchema,
   NONCE_TTL_MS,
   buildSignInMessage,
+  signInChainId,
   type NonceResponse,
   type User,
 } from '@ibt/shared';
@@ -22,8 +23,14 @@ import { isDuplicateKey } from '../../lib/mongoErrors.js';
 const JWT_ALG = 'HS256';
 const UPSERT_ATTEMPTS = 3;
 
-function signInDomain(ctx: AppContext): string {
-  return new URL(ctx.env.WEB_ORIGIN).host;
+function signInMessage(ctx: AppContext, wallet: string, nonce: string, issuedAt: Date): string {
+  return buildSignInMessage({
+    uri: ctx.env.WEB_ORIGIN,
+    chainId: signInChainId(ctx.env.CLUSTER),
+    wallet,
+    nonce,
+    issuedAt,
+  });
 }
 
 function jwtKey(ctx: AppContext): Uint8Array {
@@ -39,7 +46,7 @@ export async function issueNonce(ctx: AppContext, wallet: string): Promise<Nonce
     nonce,
     expiresAt: new Date(issuedAt.getTime() + NONCE_TTL_MS),
   });
-  const message = buildSignInMessage({ domain: signInDomain(ctx), wallet, nonce, issuedAt });
+  const message = signInMessage(ctx, wallet, nonce, issuedAt);
   return { nonce, message };
 }
 
@@ -109,12 +116,12 @@ export async function verifySignIn(
   if (!stored) throw unauthorized('unknown or used nonce');
   if (stored.expiresAt.getTime() <= ctx.clock().getTime()) throw unauthorized('nonce expired');
 
-  const message = buildSignInMessage({
-    domain: signInDomain(ctx),
-    wallet: input.wallet,
-    nonce: stored.nonce,
-    issuedAt: new Date(stored.expiresAt.getTime() - NONCE_TTL_MS),
-  });
+  const message = signInMessage(
+    ctx,
+    input.wallet,
+    stored.nonce,
+    new Date(stored.expiresAt.getTime() - NONCE_TTL_MS),
+  );
   const signature = base58Decode(input.signature);
   const publicKey = base58Decode(input.wallet);
   const valid =

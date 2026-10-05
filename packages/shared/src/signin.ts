@@ -1,17 +1,39 @@
+import type { Cluster } from './constants.js';
+
 export interface SignInMessageInput {
-  domain: string;
+  /** Origin of the web app, e.g. `https://app.example`; its host is the SIWS domain. */
+  uri: string;
+  chainId: string;
   wallet: string;
   nonce: string;
   issuedAt: Date | string;
 }
 
-/** G22 fixed template; the api verifies the wallet's signature over exactly these bytes. */
+export function signInChainId(cluster: Cluster): string {
+  return cluster === 'mainnet-beta' ? 'mainnet' : 'devnet';
+}
+
+/**
+ * G22 fixed template; the api verifies the wallet's signature over exactly these bytes.
+ * Phantom refuses SIWS text without URI, Version and Chain ID, and the field order
+ * matches `createSignInMessageText`, so a wallet's own `signIn` produces the same text.
+ */
 export function buildSignInMessage({
-  domain,
+  uri,
+  chainId,
   wallet,
   nonce,
   issuedAt,
 }: SignInMessageInput): string {
   const iso = typeof issuedAt === 'string' ? issuedAt : issuedAt.toISOString();
-  return `${domain} wants you to sign in with your Solana account:\n${wallet}\n\nNonce: ${nonce}\nIssued At: ${iso}`;
+  return [
+    `${new URL(uri).host} wants you to sign in with your Solana account:`,
+    wallet,
+    '',
+    `URI: ${uri}`,
+    'Version: 1',
+    `Chain ID: ${chainId}`,
+    `Nonce: ${nonce}`,
+    `Issued At: ${iso}`,
+  ].join('\n');
 }

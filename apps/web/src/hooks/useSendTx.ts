@@ -90,7 +90,7 @@ export function mapSendTxError(error: unknown): SendTxError {
     return { code: 'blockhash_expired', message: MESSAGES.blockhash_expired };
   }
   if (/slippage|0x1771/i.test(text)) return { code: 'slippage', message: MESSAGES.slippage };
-  if (/insufficient (lamports|funds for)|no record of a prior credit/i.test(text)) {
+  if (/insufficient (lamports|funds for)|no record of a prior credit|AccountNotFound/i.test(text)) {
     return { code: 'insufficient_sol', message: MESSAGES.insufficient_sol };
   }
   if (isApiError(error)) return { code: 'unknown', message: error.message };

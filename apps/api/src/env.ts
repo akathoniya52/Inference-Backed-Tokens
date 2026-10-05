@@ -54,7 +54,8 @@ const fields = z.object({
   ADMIN_TOKEN: z.string().min(32),
 
   PORT: z.coerce.number().int().min(0).max(65_535).default(4000),
-  WEB_ORIGIN: z.url(),
+  // cors matches Origin exactly, so drop any trailing slash or path.
+  WEB_ORIGIN: z.url().transform((url) => new URL(url).origin),
   TRUST_PROXY: TrustProxySchema,
   ADMIN_IP_ALLOWLIST: csv,
   RATE_LIMIT_PER_MIN: z.coerce.number().int().min(1).optional(),

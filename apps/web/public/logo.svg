@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>Inference-Backed Tokens</title>
+  <defs>
+    <linearGradient id="ibt-coin" x1="10" y1="6" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD98A"/>
+      <stop offset="0.45" stop-color="#F2A93B"/>
+      <stop offset="1" stop-color="#B8650F"/>
+    </linearGradient>
+    <radialGradient id="ibt-core" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(32 32) scale(9)">
+      <stop offset="0" stop-color="#FFF4D6"/>
+      <stop offset="1" stop-color="#FFBE5C"/>
+    </radialGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#ibt-coin)"/>
+  <circle cx="32" cy="32" r="30" stroke="#1A1104" stroke-opacity="0.35" stroke-width="1.5"/>
+  <circle cx="32" cy="32" r="25" stroke="#1A1104" stroke-opacity="0.4" stroke-width="2" stroke-dasharray="1.5 2.42"/>
+  <path d="M10 25a23 23 0 0 1 17-16" stroke="#FFFFFF" stroke-opacity="0.55" stroke-width="2.5" stroke-linecap="round"/>
+  <g stroke="#1A1104" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M19 20 32 32 45 20M19 44 32 32 45 44M19 20v24M45 20v24"/>
+  </g>
+  <g fill="#1A1104">
+    <circle cx="19" cy="20" r="4.5"/>
+    <circle cx="45" cy="20" r="4.5"/>
+    <circle cx="19" cy="44" r="4.5"/>
+    <circle cx="45" cy="44" r="4.5"/>
+    <circle cx="32" cy="32" r="8"/>
+  </g>
+  <circle cx="32" cy="32" r="4.5" fill="url(#ibt-core)"/>
+</svg>

@@ -15,12 +15,7 @@ export function Layout() {
       <header className="sticky top-0 z-20 border-b border-ink-800 bg-ink-950/95 backdrop-blur">
         <div className="mx-auto flex h-16 w-full max-w-shell items-center gap-4 px-4 sm:gap-6 sm:px-6">
           <Link to="/" className="flex shrink-0 items-center gap-3">
-            <span
-              aria-hidden="true"
-              className="grid h-7 w-7 place-items-center rounded-sm bg-accent font-mono text-xs font-medium text-accent-fg"
-            >
-              IB
-            </span>
+            <img src="/logo.svg" alt="" aria-hidden="true" className="h-8 w-8" />
             <span className="hidden text-sm font-medium tracking-tight text-ink-50 md:inline">
               Inference-Backed Tokens
             </span>

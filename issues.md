@@ -1,5 +1,5 @@
 # Issues: Inference-Backed Tokens codebase audit
-
+ 
 Audit date: 2026-10-06 · Commit: `b8d9286` (main) · Scope: all of `apps/*`, `packages/*`, `scripts/*`, infra/CI config.
 
 Each finding has a severity, location (`file:line`), what goes wrong, how it is triggered, and a suggested fix.

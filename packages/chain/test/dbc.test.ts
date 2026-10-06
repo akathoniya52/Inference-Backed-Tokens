@@ -11,10 +11,12 @@ import {
 import {
   Connection,
   Keypair,
+  type ParsedTransactionWithMeta,
   PublicKey,
   Transaction,
   type TransactionError,
 } from '@solana/web3.js';
+import bs58 from 'bs58';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -27,7 +29,13 @@ import {
   readPool,
   verifyLaunch,
 } from '../src/dbc.js';
-import { DAMM_V2_CONFIG_100_BPS, deriveDbcPoolAddress, NATIVE_MINT } from '../src/sdk.js';
+import { metadataAddress, METAPLEX_METADATA_PROGRAM_ID } from '../src/metadata.js';
+import {
+  DAMM_V2_CONFIG_100_BPS,
+  DBC_PROGRAM_ID,
+  deriveDbcPoolAddress,
+  NATIVE_MINT,
+} from '../src/sdk.js';
 import { loadAccountFixture } from '../src/testing/fixtures.js';
 
 const pool = loadAccountFixture('dbc-pool') as VirtualPool;
@@ -48,11 +56,79 @@ function stubState(found: VirtualPool | null = pool) {
   return getPool;
 }
 
-function stubLaunchTx(conn: Connection, err: TransactionError | null = null) {
-  return vi.spyOn(conn, 'getSignatureStatuses').mockResolvedValue({
-    context: { slot: 1 },
-    value: [{ slot: 1, confirmations: null, err, confirmationStatus: 'finalized' }],
-  });
+const INIT_SPL = [140, 85, 215, 176, 102, 54, 104, 79];
+
+function launchIx(
+  accounts: { pool?: PublicKey; mint?: PublicKey; config?: PublicKey; programId?: PublicKey } = {},
+) {
+  return {
+    programId: accounts.programId ?? DBC_PROGRAM_ID,
+    accounts: [
+      accounts.config ?? ourConfig,
+      Keypair.generate().publicKey,
+      owner,
+      accounts.mint ?? mint,
+      NATIVE_MINT,
+      accounts.pool ?? poolAddress,
+    ],
+    data: bs58.encode(Buffer.from([...INIT_SPL, 1, 2, 3])),
+  };
+}
+
+function launchTx(
+  err: TransactionError | null = null,
+  ix: ReturnType<typeof launchIx> = launchIx(),
+  inner = false,
+): ParsedTransactionWithMeta {
+  return {
+    slot: 1,
+    blockTime: null,
+    transaction: {
+      signatures: ['sig'],
+      message: { accountKeys: [], instructions: inner ? [] : [ix], recentBlockhash: 'x' },
+    },
+    meta: {
+      err,
+      fee: 5000,
+      preBalances: [],
+      postBalances: [],
+      innerInstructions: inner ? [{ index: 0, instructions: [ix] }] : [],
+    },
+  };
+}
+
+function stubLaunchTx(
+  conn: Connection,
+  err: TransactionError | null = null,
+  tx: ParsedTransactionWithMeta | null = launchTx(err),
+) {
+  return vi.spyOn(conn, 'getParsedTransaction').mockResolvedValue(tx);
+}
+
+function metadataAccount(fields: { name: string; symbol: string; uri: string }) {
+  const str = (text: string, padTo: number) => {
+    const bytes = Buffer.alloc(padTo);
+    Buffer.from(text).copy(bytes);
+    const len = Buffer.alloc(4);
+    len.writeUInt32LE(padTo);
+    return Buffer.concat([len, bytes]);
+  };
+  const data = Buffer.concat([
+    Buffer.from([4]),
+    Keypair.generate().publicKey.toBuffer(),
+    mint.toBuffer(),
+    str(fields.name, 32),
+    str(fields.symbol, 10),
+    str(fields.uri, 200),
+    Buffer.from([0, 0, 0, 0, 0]),
+  ]);
+  return {
+    data,
+    owner: METAPLEX_METADATA_PROGRAM_ID,
+    executable: false,
+    lamports: 1,
+    rentEpoch: 0,
+  };
 }
 
 afterEach(() => {
@@ -108,6 +184,66 @@ describe('verifyLaunch', () => {
     });
   });
 
+  it('fetches the launch tx at confirmed', async () => {
+    const conn = connection();
+    const getTx = stubLaunchTx(conn);
+    stubState();
+    await verifyLaunch(conn, input);
+    expect(getTx).toHaveBeenCalledWith('sig', {
+      commitment: 'confirmed',
+      maxSupportedTransactionVersion: 0,
+    });
+  });
+
+  it('accepts a launch made through a CPI', async () => {
+    const conn = connection();
+    stubLaunchTx(conn, null, launchTx(null, launchIx(), true));
+    stubState();
+    await expect(verifyLaunch(conn, input)).resolves.toEqual({ pool: poolAddress.toBase58() });
+  });
+
+  it.each([
+    ['tx_not_found', null],
+    ['tx_failed', launchTx('AccountNotFound')],
+    ['tx_not_launch', launchTx(null, launchIx({ programId: Keypair.generate().publicKey }))],
+    ['tx_not_launch', launchTx(null, launchIx({ pool: Keypair.generate().publicKey }))],
+    ['tx_not_launch', launchTx(null, launchIx({ mint: Keypair.generate().publicKey }))],
+  ])('rejects the signature with reason %s', async (reason, tx) => {
+    const conn = connection();
+    stubLaunchTx(conn, null, tx);
+    const getPool = stubState();
+    const err = await verifyLaunch(conn, input).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AppError);
+    expect(err).toMatchObject({ code: 'pool_mismatch', details: { reason } });
+    expect(getPool).not.toHaveBeenCalled();
+  });
+
+  it('checks the Metaplex metadata when expected values are given', async () => {
+    const conn = connection();
+    stubLaunchTx(conn);
+    stubState();
+    const expectedMetadata = { name: 'Model', symbol: 'MDL', uri: 'https://x.test/m.json' };
+    const getAccountInfo = vi
+      .spyOn(conn, 'getAccountInfo')
+      .mockResolvedValue(metadataAccount(expectedMetadata));
+    await expect(verifyLaunch(conn, { ...input, expectedMetadata })).resolves.toEqual({
+      pool: poolAddress.toBase58(),
+    });
+    expect(getAccountInfo).toHaveBeenCalledWith(metadataAddress(mint));
+
+    const wrong = await verifyLaunch(conn, {
+      ...input,
+      expectedMetadata: { ...expectedMetadata, symbol: 'USDC' },
+    }).catch((e: unknown) => e);
+    expect(wrong).toMatchObject({ details: { reason: 'metadata_symbol' } });
+
+    getAccountInfo.mockResolvedValue(null);
+    const missing = await verifyLaunch(conn, { ...input, expectedMetadata }).catch(
+      (e: unknown) => e,
+    );
+    expect(missing).toMatchObject({ details: { reason: 'metadata_not_found' } });
+  });
+
   it.each([
     ['a failed launch tx', { txErr: 'AccountNotFound' as TransactionError }],
     ['a foreign creator', { creator: Keypair.generate().publicKey }],
@@ -124,14 +260,15 @@ describe('verifyLaunch', () => {
 
   it('rejects a pool whose config is not ours', async () => {
     const conn = connection();
-    stubLaunchTx(conn);
     const foreign = Keypair.generate().publicKey;
+    const foreignPool = deriveDbcPoolAddress(NATIVE_MINT, mint, foreign);
+    stubLaunchTx(conn, null, launchTx(null, launchIx({ config: foreign, pool: foreignPool })));
     const getPool = stubState();
     const err = await verifyLaunch(conn, { ...input, expectedConfig: foreign }).catch(
       (e: unknown) => e,
     );
-    expect(getPool).toHaveBeenCalledWith(deriveDbcPoolAddress(NATIVE_MINT, mint, foreign));
-    expect(err).toMatchObject({ code: 'pool_mismatch' });
+    expect(getPool).toHaveBeenCalledWith(foreignPool);
+    expect(err).toMatchObject({ code: 'pool_mismatch', details: { reason: 'config' } });
   });
 });
 

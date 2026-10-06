@@ -7,12 +7,16 @@ import type { LeaseGuard } from './ctx.js';
 
 export const LEASE_TTL_MS = 90_000;
 export const LEASE_RENEW_MS = 30_000;
+/** Wait between renewal retries after a failed round (KPR-16). */
+export const LEASE_RETRY_MS = 2_000;
 
 export interface LeaseOptions {
   name?: string;
   holder: string;
   ttlMs?: number;
   renewMs?: number;
+  /** Wait between renewal retries while the current claim is still valid. */
+  retryMs?: number;
   logger: Logger;
   onAcquired?: () => void | Promise<void>;
   /** Stops every job (L253). */
@@ -38,6 +42,7 @@ export function createLease(opts: LeaseOptions): Lease {
   const name = opts.name ?? 'keeper';
   const ttlMs = opts.ttlMs ?? LEASE_TTL_MS;
   const renewMs = opts.renewMs ?? LEASE_RENEW_MS;
+  const retryMs = opts.retryMs ?? LEASE_RETRY_MS;
   const log = opts.logger.child({ lease: name, holder: opts.holder });
   let held = false;
   let epoch = 0;
@@ -95,14 +100,29 @@ export function createLease(opts: LeaseOptions): Lease {
     }
   }
 
-  async function round(): Promise<boolean> {
-    let owns: boolean;
-    try {
-      owns = await claim();
-    } catch (err) {
-      log.warn({ err }, 'lease round failed');
-      owns = false;
+  /**
+   * A failed renewal is retried every `retryMs` while the last claim is still valid
+   * (KPR-16): one DB blip must not abort a run the lease still covers. Only a refusal, or
+   * failures past the deadline, count as losing it.
+   */
+  async function claimWithRetry(): Promise<boolean> {
+    for (;;) {
+      try {
+        return await claim();
+      } catch (err) {
+        const left = deadline - performance.now();
+        if (!held || left <= 0) {
+          log.warn({ err }, 'lease round failed');
+          return false;
+        }
+        log.warn({ err, msLeft: Math.round(left) }, 'lease renewal failed; retrying');
+        await new Promise((resolve) => setTimeout(resolve, Math.min(retryMs, left)));
+      }
     }
+  }
+
+  async function round(): Promise<boolean> {
+    const owns = await claimWithRetry();
     if (owns && !held) {
       held = true;
       log.info('lease acquired');

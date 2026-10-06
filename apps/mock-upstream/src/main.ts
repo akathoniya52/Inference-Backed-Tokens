@@ -2,7 +2,8 @@ import { createLogger, startSelfPing } from '@ibt/shared/node';
 
 import { MOCK_MODES, MOCK_UPSTREAM_PORT, createMockUpstream, type MockMode } from './index.js';
 
-const port = Number(process.env.MOCK_UPSTREAM_PORT ?? MOCK_UPSTREAM_PORT);
+// `||`, not `??`: a `.env` line `KEY=` sets an empty string (port 0, or a key nothing matches).
+const port = Number(process.env.MOCK_UPSTREAM_PORT || MOCK_UPSTREAM_PORT);
 const envMode = process.env.MOCK_UPSTREAM_MODE;
 const mode: MockMode = MOCK_MODES.find((m) => m === envMode) ?? 'ok';
 
@@ -11,7 +12,7 @@ const upstream = await createMockUpstream({
   port,
   host: '0.0.0.0',
   mode,
-  apiKey: process.env.MOCK_UPSTREAM_API_KEY ?? null,
+  apiKey: process.env.MOCK_UPSTREAM_API_KEY || null,
 });
 process.stdout.write(`mock-upstream listening on :${upstream.port} (mode ${mode})\n`);
 

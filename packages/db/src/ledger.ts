@@ -77,6 +77,16 @@ export interface WriteOptions {
   session?: ClientSession;
 }
 
+export interface AdjustOptions extends WriteOptions {
+  /** Let a negative delta take spendable funds (`balance − held`) below zero. */
+  allowNegative?: boolean;
+}
+
+export interface ReadOptions {
+  /** Read inside the caller's transaction (one snapshot with its other reads). */
+  session?: ClientSession;
+}
+
 function assertPositive(amount: bigint, name: string): void {
   if (amount <= 0n) throw new RangeError(`${name} must be > 0, got ${amount}`);
 }
@@ -102,6 +112,31 @@ async function incUser(
   return user;
 }
 
+/** Takes `amountMicro` from the balance iff `balance − held ≥ amount`, atomically. */
+async function debitSpendable(
+  userId: Id,
+  amountMicro: bigint,
+  session: ClientSession,
+): Promise<UserDoc> {
+  const user = await Users.findOneAndUpdate(
+    {
+      _id: userId,
+      $expr: {
+        $gte: [{ $subtract: ['$balanceMicroUsdc', '$heldMicroUsdc'] }, amountMicro],
+      },
+    },
+    { $inc: { balanceMicroUsdc: -amountMicro } },
+    { new: true, session },
+  );
+  if (user) return user;
+  const current = await Users.findById(userId, null, { session });
+  if (!current) throw userNotFound(userId);
+  const shortfall = amountMicro - (current.balanceMicroUsdc - current.heldMicroUsdc);
+  throw new AppError('insufficient_credits', {
+    details: { shortfallUsdc: microToUsdcString(shortfall) },
+  });
+}
+
 async function insertEntry(
   fields: Record<string, unknown>,
   session: ClientSession,
@@ -112,12 +147,22 @@ async function insertEntry(
 }
 
 async function insertRequest(
-  userId: Types.ObjectId,
+  holdRow: LedgerDoc,
   record: RequestRecord,
   costMicro: bigint,
   session: ClientSession,
 ): Promise<void> {
-  await Requests.create([{ ...record, userId, costMicroUsdc: costMicro }], { session });
+  await Requests.create(
+    [
+      {
+        ...record,
+        userId: holdRow.userId,
+        costMicroUsdc: costMicro,
+        dailyCapDay: holdRow.dailyCap?.day ?? null,
+      },
+    ],
+    { session },
+  );
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -136,17 +181,21 @@ function dailyCapExceeded(capMicro: bigint): AppError {
 
 /**
  * Creates the key's `dailySpend` row for the day if missing, seeded with the
- * spend already recorded in `requests` (rows written before the counter).
+ * spend already recorded in `requests` (rows written before the counter). A
+ * request counts on the day its hold reserved against (DB-05): one held at 23:59
+ * and captured after midnight was already counted on the earlier day's row.
  */
 async function ensureDailySpend(userId: Id, cap: DailyCapOptions): Promise<void> {
   const apiKeyId = new Types.ObjectId(cap.apiKeyId);
   if (await DailySpend.exists({ apiKeyId, day: cap.day })) return;
+  const dayEnd = new Date(cap.day.getTime() + DAY_MS);
   const [row] = await Requests.aggregate<{ spent: bigint | number }>([
     {
       $match: {
         userId: new Types.ObjectId(userId),
-        createdAt: { $gte: cap.day, $lt: new Date(cap.day.getTime() + DAY_MS) },
+        createdAt: { $gte: cap.day },
         apiKeyId,
+        $or: [{ dailyCapDay: cap.day }, { dailyCapDay: null, createdAt: { $lt: dayEnd } }],
       },
     },
     { $group: { _id: null, spent: { $sum: '$costMicroUsdc' } } },
@@ -311,6 +360,14 @@ export async function capture(
       return { alreadyCaptured: true, entry, balanceMicro: user.balanceMicroUsdc };
     }
 
+    // DB-01: the hold is what `hold()` checked against spendable funds; billing past
+    // it could overdraw. Throwing aborts the transaction, so the hold stays open.
+    const estimateMicro = -closed.amountMicroUsdc;
+    if (costMicro > estimateMicro) {
+      throw new AppError('internal', {
+        message: `capture of ${costMicro} exceeds hold ${String(holdId)} of ${estimateMicro}`,
+      });
+    }
     const user = await incUser(
       closed.userId,
       { balanceMicroUsdc: -costMicro, heldMicroUsdc: closed.amountMicroUsdc },
@@ -328,7 +385,7 @@ export async function capture(
       },
       session,
     );
-    await insertRequest(user._id, request, costMicro, session);
+    await insertRequest(closed, request, costMicro, session);
     return { alreadyCaptured: false, entry, balanceMicro: user.balanceMicroUsdc };
   });
 }
@@ -339,8 +396,9 @@ async function closeHold(
   request: RequestRecord | undefined,
   session: ClientSession,
 ): Promise<boolean> {
+  // GW-12: a hold with a capture due is billed by hold expiry, never closed for free.
   const closed = await Ledger.findOneAndUpdate(
-    { _id: holdId, type: 'hold', status: 'open' },
+    { _id: holdId, type: 'hold', status: 'open', captureDueMicroUsdc: null },
     { $set: { status } },
     { new: true, session },
   );
@@ -362,7 +420,7 @@ async function closeHold(
     },
     session,
   );
-  if (request) await insertRequest(user._id, request, 0n, session);
+  if (request) await insertRequest(closed, request, 0n, session);
   return true;
 }
 
@@ -374,10 +432,86 @@ export async function release(holdId: Id, request?: RequestRecord): Promise<Rele
   return { released };
 }
 
-/** Releases every open hold whose `expiresAt` is at or before `now`; returns how many. */
+/**
+ * GW-05: true once the hold is closed without a charge (released or expired),
+ * so its call was never billed and never will be.
+ */
+export async function isHoldUnbilled(holdId: Id): Promise<boolean> {
+  const row = await Ledger.findOne({ _id: holdId, type: 'hold' }, { status: 1 }).lean();
+  return row?.status === 'released' || row?.status === 'expired';
+}
+
+/**
+ * GW-12: records on a still open hold the cost of a delivered call whose
+ * capture failed, so hold expiry captures it instead of releasing it. False
+ * when the hold is no longer open (captured or closed meanwhile).
+ */
+export async function markCaptureDue(
+  holdId: Id,
+  costMicro: bigint,
+  request: RequestRecord,
+): Promise<boolean> {
+  if (costMicro < 0n) throw new RangeError(`costMicro must be >= 0, got ${costMicro}`);
+  const { modifiedCount } = await Ledger.updateOne(
+    {
+      _id: holdId,
+      type: 'hold',
+      status: 'open',
+      // The capture guard (DB-01): never more than the hold reserved.
+      amountMicroUsdc: { $lte: -costMicro },
+    },
+    { $set: { captureDueMicroUsdc: costMicro, captureDueRequest: request } },
+  );
+  return modifiedCount === 1;
+}
+
+export interface DueCapture {
+  holdId: Types.ObjectId;
+  costMicro: bigint;
+  request: RequestRecord;
+}
+
+/** Open holds past `expiresAt` that carry a due capture (GW-12). */
+export async function findDueCaptures(now: Date = new Date()): Promise<DueCapture[]> {
+  const rows = await Ledger.find({
+    type: 'hold',
+    status: 'open',
+    expiresAt: { $lte: now },
+    captureDueMicroUsdc: { $ne: null },
+  }).lean();
+  const due: DueCapture[] = [];
+  for (const row of rows) {
+    const request = row.captureDueRequest;
+    if (row.captureDueMicroUsdc == null || !request) continue;
+    due.push({
+      holdId: row._id,
+      costMicro: row.captureDueMicroUsdc,
+      request: {
+        requestId: request.requestId,
+        apiKeyId: request.apiKeyId,
+        modelId: request.modelId,
+        status: request.status,
+        ...(request.idempotencyKey == null ? {} : { idempotencyKey: request.idempotencyKey }),
+        promptTokens: request.promptTokens,
+        completionTokens: request.completionTokens,
+        ...(request.usageEstimated == null ? {} : { usageEstimated: request.usageEstimated }),
+        ...(request.discountBps == null ? {} : { discountBps: request.discountBps }),
+        latencyMs: request.latencyMs,
+        streamed: request.streamed,
+        upstreamStatus: request.upstreamStatus ?? null,
+      },
+    });
+  }
+  return due;
+}
+
+/**
+ * Releases every open hold whose `expiresAt` is at or before `now`; returns how
+ * many. Holds with a due capture are left to `findDueCaptures` and `capture`.
+ */
 export async function expireHolds(now: Date = new Date()): Promise<number> {
   const stale = await Ledger.find(
-    { type: 'hold', status: 'open', expiresAt: { $lte: now } },
+    { type: 'hold', status: 'open', expiresAt: { $lte: now }, captureDueMicroUsdc: null },
     { _id: 1 },
   ).lean();
   let expired = 0;
@@ -418,16 +552,24 @@ export async function credit(
   });
 }
 
+/**
+ * Moves the balance by a signed delta. A negative delta is refused with
+ * `insufficient_credits` when it would take spendable funds (`balance − held`)
+ * below zero (DB-02), checked atomically with the update, unless `allowNegative`.
+ */
 export async function adjust(
   userId: Id,
   deltaMicro: bigint,
   reason: string,
-  options: WriteOptions = {},
+  options: AdjustOptions = {},
 ): Promise<BalanceChange> {
   if (deltaMicro === 0n) throw new RangeError('deltaMicro must be non-zero');
+  const floored = deltaMicro < 0n && !options.allowNegative;
 
   return inSession(options.session, async (session) => {
-    const user = await incUser(userId, { balanceMicroUsdc: deltaMicro }, session);
+    const user = floored
+      ? await debitSpendable(userId, -deltaMicro, session)
+      : await incUser(userId, { balanceMicroUsdc: deltaMicro }, session);
     const entry = await insertEntry(
       {
         userId: user._id,
@@ -442,17 +584,28 @@ export async function adjust(
   });
 }
 
-/** Balance implied by the ledger (L372): deposits + adjustments − captures. */
-export async function recomputeBalance(userId: Id): Promise<bigint> {
+async function sumLedger(match: Record<string, unknown>, options: ReadOptions): Promise<bigint> {
   const [row] = await Ledger.aggregate<{ total: bigint | number }>([
-    {
-      $match: {
-        userId: new Types.ObjectId(userId),
-        type: { $in: [...BALANCE_LEDGER_TYPES] },
-      },
-    },
+    { $match: match },
     { $group: { _id: null, total: { $sum: '$amountMicroUsdc' } } },
-  ]);
+  ]).session(options.session ?? null);
   if (!row) return 0n;
   return typeof row.total === 'bigint' ? row.total : BigInt(row.total);
+}
+
+/** Balance implied by the ledger (L372): deposits + adjustments − captures. */
+export async function recomputeBalance(userId: Id, options: ReadOptions = {}): Promise<bigint> {
+  return sumLedger(
+    { userId: new Types.ObjectId(userId), type: { $in: [...BALANCE_LEDGER_TYPES] } },
+    options,
+  );
+}
+
+/** Held amount implied by the ledger (KPR-07): the estimates of the user's open holds. */
+export async function recomputeHeld(userId: Id, options: ReadOptions = {}): Promise<bigint> {
+  const open = await sumLedger(
+    { userId: new Types.ObjectId(userId), type: 'hold', status: 'open' },
+    options,
+  );
+  return -open;
 }

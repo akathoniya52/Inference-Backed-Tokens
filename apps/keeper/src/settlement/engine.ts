@@ -1,6 +1,7 @@
 import { RPC_BACKOFF_MS } from '@ibt/chain';
 import { Settlements, type SettlementDoc } from '@ibt/db';
 import { AppError } from '@ibt/shared';
+import { redactSecrets } from '@ibt/shared/node';
 
 import type { KeeperCtx } from '../ctx.js';
 import {
@@ -14,6 +15,7 @@ import { PendingTxUnknownError, PendingTxUnresolvedError } from './pendingTx.js'
 import {
   NonRetryableSettlementError,
   SETTLEMENT_STEPS,
+  SettlementDeferredError,
   SolPriceRejectedError,
   hasCompleted,
   type NamedStep,
@@ -29,8 +31,14 @@ export interface EngineOptions {
 
 export const STEP_ATTEMPTS = 3;
 
+/**
+ * Status codes only count as a whole word (KPR-11), so an ObjectId or signature that
+ * happens to contain `502` in a message does not make a permanent error retryable.
+ */
 const TRANSIENT_MESSAGE =
-  /blockhash|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|network|429|50[234]|rpc|changed mid-run/i;
+  /blockhash|timed? ?out|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|network|\b(?:429|50[234])\b|\brpc\b|changed mid-run/i;
+
+const TRANSIENT_STATUS = new Set([429, 502, 503, 504]);
 
 /** RPC, blockhash, send and Mongo transaction errors are retried; anything else fails at once. */
 export function isRetryable(err: unknown): boolean {
@@ -43,14 +51,22 @@ export function isRetryable(err: unknown): boolean {
     if (err.errorLabelSet.has('TransientTransactionError')) return true;
   }
   if ('code' in err && err.code === 112) return true;
+  const status: unknown =
+    'status' in err ? err.status : 'statusCode' in err ? err.statusCode : undefined;
+  if (typeof status === 'number' && TRANSIENT_STATUS.has(status)) return true;
   return err instanceof Error && TRANSIENT_MESSAGE.test(err.message);
 }
 
-/** Includes the cause chain: `chain_send_failed` alone hides the program error behind it. */
-const errorMessage = (err: unknown): string => {
+const rawMessage = (err: unknown): string => {
   if (!(err instanceof Error)) return String(err);
-  return err.cause instanceof Error ? `${err.message}: ${errorMessage(err.cause)}` : err.message;
+  return err.cause instanceof Error ? `${err.message}: ${rawMessage(err.cause)}` : err.message;
 };
+
+/**
+ * Includes the cause chain (`chain_send_failed` alone hides the program error behind it),
+ * with RPC keys and other credentials redacted before it is stored, logged or alerted (DB-07).
+ */
+const errorMessage = (err: unknown): string => redactSecrets(rawMessage(err));
 
 async function reload(settlement: SettlementDoc): Promise<SettlementDoc> {
   const fresh = await Settlements.findById(settlement._id);
@@ -80,7 +96,10 @@ async function fail(
     $set: { state: 'failed', error: `${step}: ${errorMessage(err)}` },
   });
   const failed = await reload(settlement);
-  ctx.logger.error({ err, settlement: id, step, attempts: failed.attempts }, 'settlement failed');
+  ctx.logger.error(
+    { error: failed.error, settlement: id, step, attempts: failed.attempts },
+    'settlement failed',
+  );
   await ctx.alerter.alert('error', 'settlement failed', {
     settlementId: id,
     modelId: failed.modelId.toHexString(),
@@ -144,6 +163,13 @@ async function runSteps(
         break;
       } catch (err) {
         if (asConflict(err)) throw err;
+        if (err instanceof SettlementDeferredError) {
+          ctx.logger.info(
+            { settlement: settlement._id.toHexString(), step: step.name, reason: err.message },
+            'settlement step deferred to the next run',
+          );
+          return reload(settlement);
+        }
         await updateFenced(settlement, {
           $inc: { attempts: 1 },
           $set: { error: `${step.name}: ${errorMessage(err)}` },
@@ -153,7 +179,12 @@ async function runSteps(
           return fail(ctx, settlement, step.name, err);
         }
         ctx.logger.warn(
-          { err, settlement: settlement._id.toHexString(), step: step.name, attempt },
+          {
+            error: errorMessage(err),
+            settlement: settlement._id.toHexString(),
+            step: step.name,
+            attempt,
+          },
           'settlement step failed; retrying',
         );
         await ctx.sleep(backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0);

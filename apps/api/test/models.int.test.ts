@@ -7,7 +7,7 @@ import {
 } from '@ibt/shared';
 import { decrypt } from '@ibt/shared/node';
 import request, { type Response } from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { bearer, errorOf, makeTestApp, newWallet, signIn, type TestApp } from './helpers.js';
 
@@ -183,6 +183,83 @@ describe('models', () => {
     const model = OwnerModelSchema.parse(resumed.body);
     expect(model.status).toBe('active');
     expect(model.health.consecutiveFailures).toBe(0);
+  });
+
+  it('the owner cannot lift an admin pause (API-02) or write over a delist (API-03)', async () => {
+    const created = OwnerModelSchema.parse((await create(owner)).body);
+    const patch = (body: object) =>
+      request(t.app)
+        .patch(`/api/models/${created.id}`)
+        .set('Authorization', bearer(owner))
+        .send(body);
+
+    // An owner pause becomes an admin pause when an admin pauses too.
+    expect((await patch({ status: 'paused' })).status).toBe(200);
+    expect((await Models.findById(created.id).lean())?.pausedBy).toBe('owner');
+    const admin = await request(t.app)
+      .post(`/api/admin/models/${created.id}/pause`)
+      .set('Authorization', bearer(t.env.ADMIN_TOKEN));
+    expect(admin.status).toBe(200);
+    expect((await Models.findById(created.id).lean())?.pausedBy).toBe('admin');
+
+    const resume = await patch({ status: 'active' });
+    expect(resume.status).toBe(403);
+    expect(errorOf(resume).message).toBe('an admin paused this model');
+    // Other fields still update, and the status stays as the admin left it.
+    expect((await patch({ name: 'Renamed', status: 'paused' })).status).toBe(200);
+    expect(await Models.findById(created.id).lean()).toMatchObject({
+      name: 'Renamed',
+      status: 'paused',
+      pausedBy: 'admin',
+    });
+
+    await Models.updateOne({ _id: created.id }, { $set: { status: 'delisted' } });
+    const afterDelist = await patch({ name: 'Back' });
+    expect(afterDelist.status).toBe(403);
+    expect((await Models.findById(created.id).lean())?.status).toBe('delisted');
+  });
+
+  it('a concurrent delist between the read and the write is never undone (API-03)', async () => {
+    const created = OwnerModelSchema.parse((await create(owner)).body);
+    const stale = await Models.findById(created.id).lean();
+    // The delist lands after updateModel read the row and before it writes.
+    await Models.updateOne({ _id: created.id }, { $set: { status: 'delisted' } });
+    const spy = vi
+      .spyOn(Models, 'findById')
+      .mockReturnValueOnce({ lean: () => Promise.resolve(stale) } as unknown as ReturnType<
+        typeof Models.findById
+      >);
+    const res = await request(t.app)
+      .patch(`/api/models/${created.id}`)
+      .set('Authorization', bearer(owner))
+      .send({ status: 'paused', name: 'Raced' });
+    spy.mockRestore();
+    expect(res.status).toBe(403);
+    expect(await Models.findById(created.id).lean()).toMatchObject({
+      status: 'delisted',
+      name: created.name,
+    });
+  });
+
+  it('upstream.baseUrl must be https unless it is a loopback host (API-17)', async () => {
+    for (const baseUrl of ['http://api.example.com/v1', 'http://10.0.0.1/v1']) {
+      const res = await create(owner, {
+        ...modelBody(),
+        upstream: { ...modelBody().upstream, baseUrl },
+      });
+      expect(res.status, baseUrl).toBe(400);
+    }
+    for (const baseUrl of [
+      'https://api.example.com/v1',
+      'http://localhost:4010/v1',
+      'http://127.0.0.1:4010/v1',
+    ]) {
+      const res = await create(owner, {
+        ...modelBody(),
+        upstream: { ...modelBody().upstream, baseUrl },
+      });
+      expect(res.status, baseUrl).toBe(201);
+    }
   });
 
   it('PATCH updates fields and replaces the upstream key without reading it back', async () => {

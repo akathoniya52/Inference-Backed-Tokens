@@ -10,17 +10,26 @@ import {
   type HealthCheckResponse,
   type LaunchConfirmRequest,
   type LaunchPrepareRequest,
+  type Model,
   type OwnerModel,
   type UpdateModelRequest,
 } from '@ibt/shared';
 import { Keypair } from '@solana/web3.js';
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { z } from 'zod';
 
 import { useSendTx } from '../hooks/useSendTx';
-import { apiFetch } from '../lib/api';
+import { apiFetch, isApiError } from '../lib/api';
 import { buildLaunchTransaction } from '../lib/launch';
+import {
+  clearPendingLaunch,
+  loadPendingLaunch,
+  savePendingLaunch,
+  type PendingLaunch,
+} from '../lib/launchAttempt';
+import { publicQueryKeys } from '../lib/queries';
 
 const PriceSchema = UsdcInputSchema.refine(
   (value) => UsdcInputSchema.safeParse(value).success && usdcStringToMicro(value) > 0n,
@@ -170,12 +179,52 @@ function Alert({ children }: { children: ReactNode }) {
 interface LaunchWizardProps {
   /** Mint keypair source; tests inject a fixed key. */
   generateMint?: () => Keypair;
+  /** A registered model whose token is not live yet: the wizard opens on the launch step. */
+  resume?: Model | null;
 }
 
-export function LaunchWizard({ generateMint = () => Keypair.generate() }: LaunchWizardProps) {
+/** A stored attempt only counts for this model and, once prepared, the mint the api holds. */
+function pendingFor(model: Model): PendingLaunch | null {
+  const stored = loadPendingLaunch(model.slug);
+  if (stored === null) return null;
+  const sameModel = stored.modelId === model.id;
+  const sameMint = model.token.mint === null || model.token.mint === stored.mint;
+  if (!sameModel || !sameMint || stored.signature === null) {
+    // Unsent attempts are useless after a reload: the mint keypair is gone.
+    clearPendingLaunch(model.slug);
+    return null;
+  }
+  return stored;
+}
+
+/**
+ * Storage can be full or blocked; the attempt is then kept for this page only,
+ * since failing here would abort a launch whose transaction is already out.
+ */
+function persistAttempt(slug: string, attempt: Omit<PendingLaunch, 'v'>): PendingLaunch {
+  try {
+    return savePendingLaunch(slug, attempt);
+  } catch (error) {
+    if (error instanceof Error) return { v: 1, ...attempt };
+    throw error;
+  }
+}
+
+export function LaunchWizard({
+  generateMint = () => Keypair.generate(),
+  resume = null,
+}: LaunchWizardProps) {
   const { send, status: txStatus } = useSendTx();
-  const [step, setStep] = useState(0);
+  const queryClient = useQueryClient();
+  const [step, setStep] = useState(resume === null ? 0 : 3);
   const [model, setModel] = useState<OwnerModel | null>(null);
+  const launchModel: Model | null = model ?? resume;
+  // One mint per launch attempt: a retry after a rejection re-uses it, never a second pool.
+  const mintKeypair = useRef<Keypair | null>(null);
+  const [pending, setPending] = useState<PendingLaunch | null>(() =>
+    resume === null ? null : pendingFor(resume),
+  );
+  const [confirmRejected, setConfirmRejected] = useState(false);
   const [form, setForm] = useState<RegisterForm>({
     name: '',
     slug: '',
@@ -186,12 +235,29 @@ export function LaunchWizard({ generateMint = () => Keypair.generate() }: Launch
     outputPerMTokUsdc: '',
   });
   const [prices, setPrices] = useState({ inputPerMTokUsdc: '', outputPerMTokUsdc: '' });
-  const [symbol, setSymbol] = useState('');
+  const [symbol, setSymbol] = useState(resume?.token.symbol ?? '');
   const [errors, setErrors] = useState<FieldErrors>({});
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthCheckResponse | null>(null);
   const [launched, setLaunched] = useState<{ mint: string; signature: string } | null>(null);
+
+  function invalidateLaunch(current: Model, mint: string) {
+    return Promise.all(
+      [
+        publicQueryKeys.models(),
+        publicQueryKeys.model(current.slug),
+        publicQueryKeys.tokenState(mint),
+        ['providerModels'],
+      ].map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+    );
+  }
+
+  function finish(current: Model, mint: string, signature: string) {
+    clearPendingLaunch(current.slug);
+    setPending(null);
+    setLaunched({ mint, signature });
+  }
 
   function update<K extends keyof RegisterForm>(key: K, value: string) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -256,17 +322,18 @@ export function LaunchWizard({ generateMint = () => Keypair.generate() }: Launch
     setErrors({});
     const body: UpdateModelRequest = { pricing: parsed.data };
     void run(async () => {
-      setModel(
-        OwnerModelSchema.parse(
-          await apiFetch(`/api/models/${modelId}`, { method: 'PATCH', body: JSON.stringify(body) }),
-        ),
+      const updated = OwnerModelSchema.parse(
+        await apiFetch(`/api/models/${modelId}`, { method: 'PATCH', body: JSON.stringify(body) }),
       );
+      setModel(updated);
+      setPending(pendingFor(updated));
       setStep(3);
     });
   }
 
-  function onLaunch(event: FormEvent<HTMLFormElement>, current: OwnerModel) {
+  function onLaunch(event: FormEvent<HTMLFormElement>, current: Model) {
     event.preventDefault();
+    if (pending !== null) return;
     const parsed = SymbolSchema.safeParse(symbol);
     if (!parsed.success) {
       setErrors({ symbol: parsed.error.issues[0]?.message });
@@ -274,7 +341,8 @@ export function LaunchWizard({ generateMint = () => Keypair.generate() }: Launch
     }
     setErrors({});
     void run(async () => {
-      const mint = generateMint();
+      mintKeypair.current ??= generateMint();
+      const mint = mintKeypair.current;
       const mintAddress = mint.publicKey.toBase58();
       // Before any signature, so /metadata/<mint>.json resolves for indexers (P5-T1).
       const prepare: LaunchPrepareRequest = {
@@ -282,12 +350,14 @@ export function LaunchWizard({ generateMint = () => Keypair.generate() }: Launch
         mint: mintAddress,
         symbol: parsed.data,
       };
-      LaunchPrepareResponseSchema.parse(
+      const prepared = LaunchPrepareResponseSchema.parse(
         await apiFetch('/api/tokens/launch/prepare', {
           method: 'POST',
           body: JSON.stringify(prepare),
         }),
       );
+      const attempt = { modelId: current.id, mint: mintAddress, symbol: parsed.data };
+      let sent: PendingLaunch | null = null;
       const outcome = await send({
         build: ({ connection, payer, blockhash }) =>
           buildLaunchTransaction({
@@ -297,7 +367,11 @@ export function LaunchWizard({ generateMint = () => Keypair.generate() }: Launch
             name: current.name,
             symbol: parsed.data,
             blockhash,
+            ...(prepared.metadataUri === undefined ? {} : { apiMetadataUri: prepared.metadataUri }),
           }),
+        onSent: (signature) => {
+          sent = persistAttempt(current.slug, { ...attempt, signature });
+        },
         onConfirmed: async (signature) => {
           const confirm: LaunchConfirmRequest = {
             modelId: current.id,
@@ -311,11 +385,54 @@ export function LaunchWizard({ generateMint = () => Keypair.generate() }: Launch
             }),
           );
         },
-        invalidate: [['models'], ['model', current.slug], ['token', current.slug]],
+        invalidate: [],
       });
-      if (!outcome.ok) throw new Error(outcome.error.message);
-      setLaunched({ mint: mintAddress, signature: outcome.signature });
+      if (outcome.ok) {
+        await invalidateLaunch(current, mintAddress);
+        finish(current, mintAddress, outcome.signature);
+        return;
+      }
+      if (outcome.signature !== null) {
+        // The pool transaction went out: from here on only confirmation is retried.
+        setPending(sent ?? { v: 1, ...attempt, signature: outcome.signature });
+        setConfirmRejected(false);
+      }
+      throw new Error(outcome.error.message);
     });
+  }
+
+  function onRetryConfirm(current: Model, attempt: PendingLaunch) {
+    const { signature } = attempt;
+    if (signature === null) return;
+    void run(async () => {
+      const confirm: LaunchConfirmRequest = {
+        modelId: attempt.modelId,
+        mint: attempt.mint,
+        signature,
+      };
+      try {
+        LaunchConfirmResponseSchema.parse(
+          await apiFetch('/api/tokens/launch/confirm', {
+            method: 'POST',
+            body: JSON.stringify(confirm),
+          }),
+        );
+      } catch (error) {
+        // The api checked the chain and found no matching pool: starting over is safe.
+        if (isApiError(error) && error.code === 'pool_mismatch') setConfirmRejected(true);
+        throw error;
+      }
+      await invalidateLaunch(current, attempt.mint);
+      finish(current, attempt.mint, signature);
+    });
+  }
+
+  function onDiscardAttempt(current: Model) {
+    clearPendingLaunch(current.slug);
+    mintKeypair.current = null;
+    setPending(null);
+    setConfirmRejected(false);
+    setFailure(null);
   }
 
   const txLabel: Partial<Record<typeof txStatus, string>> = {
@@ -528,14 +645,51 @@ export function LaunchWizard({ generateMint = () => Keypair.generate() }: Launch
           </StepPanel>
         )}
 
-        {step === 3 && model !== null && (
+        {step === 3 && launchModel !== null && (
           <StepPanel index={3} title="Launch the token">
-            {launched === null ? (
-              <form noValidate className="grid gap-5" onSubmit={(e) => onLaunch(e, model)}>
+            {launched === null && pending !== null ? (
+              <div className="grid gap-4">
+                <p className="text-sm text-ink-200">
+                  The pool transaction for <span className="text-ink-50">{launchModel.name}</span>{' '}
+                  was sent, but the launch is not confirmed yet. Retry the confirmation; do not
+                  launch again, which would create and pay for a second pool.
+                </p>
+                <p className="break-all font-mono text-xs text-ink-400">Mint {pending.mint}</p>
+                <p className="break-all font-mono text-xs text-ink-600">
+                  Signature {pending.signature}
+                </p>
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    className={PRIMARY_BUTTON}
+                    disabled={busy}
+                    onClick={() => onRetryConfirm(launchModel, pending)}
+                  >
+                    {busy ? 'Confirming…' : 'Retry confirmation'}
+                  </button>
+                  {confirmRejected && (
+                    <button
+                      type="button"
+                      className={GHOST_BUTTON}
+                      disabled={busy}
+                      onClick={() => onDiscardAttempt(launchModel)}
+                    >
+                      Discard and launch again
+                    </button>
+                  )}
+                </div>
+                {confirmRejected && (
+                  <p className="text-xs text-ink-400">
+                    The api found no valid pool for this transaction, so launching again is safe.
+                  </p>
+                )}
+              </div>
+            ) : launched === null ? (
+              <form noValidate className="grid gap-5" onSubmit={(e) => onLaunch(e, launchModel)}>
                 <p className="text-sm text-ink-400">
                   Creates a bonding-curve pool for{' '}
-                  <span className="text-ink-200">{model.name}</span>. Your wallet pays the fees and
-                  becomes the pool creator.
+                  <span className="text-ink-200">{launchModel.name}</span>. Your wallet pays the
+                  fees and becomes the pool creator.
                 </p>
                 <div className="max-w-xs">
                   <Field
@@ -564,7 +718,7 @@ export function LaunchWizard({ generateMint = () => Keypair.generate() }: Launch
                 <p className="break-all font-mono text-xs text-ink-600">
                   Signature {launched.signature}
                 </p>
-                <Link to={`/t/${model.slug}`} className={`${PRIMARY_BUTTON} w-fit`}>
+                <Link to={`/t/${launchModel.slug}`} className={`${PRIMARY_BUTTON} w-fit`}>
                   View token page
                 </Link>
               </div>

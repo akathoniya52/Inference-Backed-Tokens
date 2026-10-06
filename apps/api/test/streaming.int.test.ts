@@ -323,7 +323,7 @@ describe('gateway: streaming pass-through', () => {
     });
 
     const doc = await waitFor(
-      () => Requests.findOne({ requestId }).lean(),
+      () => Requests.findOne({ userId: new Types.ObjectId(c.userId) }).lean(),
       (row) => row !== null,
     );
     expect(doc).toMatchObject({ status: 'client_abort', costMicroUsdc: 0n, streamed: true });
@@ -388,7 +388,7 @@ describe('gateway: streaming pass-through', () => {
     });
 
     const doc = await waitFor(
-      () => Requests.findOne({ requestId }).lean(),
+      () => Requests.findOne({ userId: new Types.ObjectId(c.userId) }).lean(),
       (row) => row !== null,
     );
     expect(doc).toMatchObject({ status: 'client_abort', streamed: true, usageEstimated: true });
@@ -402,7 +402,7 @@ describe('gateway: streaming pass-through', () => {
     });
   });
 
-  it('concurrent streams with one X-Request-Id: one is served and billed, none is stuck (A2)', async () => {
+  it('concurrent streams with one client X-Request-Id are separate calls, none is stuck (A2, GW-07)', async () => {
     const c = await consumer();
     const requestId = `dup-${Date.now()}`;
     const results = await Promise.all(
@@ -415,21 +415,18 @@ describe('gateway: streaming pass-through', () => {
       ),
     );
 
-    const served = results.filter((res) => res.status === 200);
-    expect(served).toHaveLength(1);
-    for (const res of results.filter((r) => r.status !== 200)) {
-      expect(res.status).toBe(400);
-      expect(errorOf(res).code).toBe('invalid_request');
+    for (const res of results) {
+      expect(res.status).toBe(200);
+      expect(res.headers['x-request-id']).toBe(requestId);
     }
     const userId = new Types.ObjectId(c.userId);
-    expect(await Ledger.countDocuments({ userId, type: 'hold' })).toBe(1);
+    expect(await Ledger.countDocuments({ userId, type: 'hold' })).toBe(5);
     expect(await Ledger.countDocuments({ userId, type: 'hold', status: 'open' })).toBe(0);
-    expect(await ledgerCounts(c.userId)).toEqual({ capture: 1, release: 0 });
-    const doc = await Requests.findOne({ requestId }).lean();
-    expect(doc).toMatchObject({ status: 'success' });
-    expect(await balances(c.userId)).toEqual({
-      balance: FUNDED_MICRO - (doc?.costMicroUsdc ?? 0n),
-      held: 0n,
-    });
+    expect(await ledgerCounts(c.userId)).toEqual({ capture: 5, release: 0 });
+    const docs = await Requests.find({ userId }).lean();
+    expect(docs).toHaveLength(5);
+    expect(new Set(docs.map((doc) => doc.requestId)).size).toBe(5);
+    const spent = docs.reduce((sum, doc) => sum + doc.costMicroUsdc, 0n);
+    expect(await balances(c.userId)).toEqual({ balance: FUNDED_MICRO - spent, held: 0n });
   });
 });

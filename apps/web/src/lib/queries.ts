@@ -1,9 +1,11 @@
 import {
+  ListModelsResponseSchema,
+  MAX_PAGE_LIMIT,
+  ModelSchema,
+  SettlementsResponseSchema,
   TokenSnapshotsResponseSchema,
-  type ListModelsResponse,
+  TokenStateResponseSchema,
   type Model,
-  type SettlementsResponse,
-  type TokenStateResponse,
 } from '@ibt/shared';
 import { skipToken, useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
@@ -38,10 +40,10 @@ function pageQuery(cursor: string | null, limit?: number): string {
 export function useModels() {
   return useInfiniteQuery({
     queryKey: publicQueryKeys.models(),
-    queryFn: ({ pageParam, signal }) =>
-      apiFetch<ListModelsResponse>(`/api/models${pageQuery(pageParam, MODELS_PAGE_LIMIT)}`, {
-        signal,
-      }),
+    queryFn: async ({ pageParam, signal }) =>
+      ListModelsResponseSchema.parse(
+        await apiFetch(`/api/models${pageQuery(pageParam, MODELS_PAGE_LIMIT)}`, { signal }),
+      ),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
   });
@@ -50,7 +52,8 @@ export function useModels() {
 export function useModel(slug: string) {
   return useQuery({
     queryKey: publicQueryKeys.model(slug),
-    queryFn: ({ signal }) => apiFetch<Model>(`/api/models/${encodeURIComponent(slug)}`, { signal }),
+    queryFn: async ({ signal }) =>
+      ModelSchema.parse(await apiFetch(`/api/models/${encodeURIComponent(slug)}`, { signal })),
   });
 }
 
@@ -60,10 +63,10 @@ export function useTokenState(mint: string | null) {
     queryFn:
       mint === null
         ? skipToken
-        : ({ signal }) =>
-            apiFetch<TokenStateResponse>(`/api/tokens/${encodeURIComponent(mint)}/state`, {
-              signal,
-            }),
+        : async ({ signal }) =>
+            TokenStateResponseSchema.parse(
+              await apiFetch(`/api/tokens/${encodeURIComponent(mint)}/state`, { signal }),
+            ),
     refetchInterval: TOKEN_STATE_REFETCH_MS,
   });
 }
@@ -74,10 +77,12 @@ export function useSettlements(mint: string | null) {
     queryFn:
       mint === null
         ? skipToken
-        : ({ pageParam, signal }) =>
-            apiFetch<SettlementsResponse>(
-              `/api/tokens/${encodeURIComponent(mint)}/settlements${pageQuery(pageParam)}`,
-              { signal },
+        : async ({ pageParam, signal }) =>
+            SettlementsResponseSchema.parse(
+              await apiFetch(
+                `/api/tokens/${encodeURIComponent(mint)}/settlements${pageQuery(pageParam)}`,
+                { signal },
+              ),
             ),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor,
@@ -99,11 +104,21 @@ export function usePriceSnapshots(mint: string | null) {
   });
 }
 
-const PROVIDER_PAGE_LIMIT = 100;
+/** Registered, but its token never went live (or its launch was never confirmed). */
+export function isUnlaunched(model: Model): boolean {
+  return model.token.status === 'none' || model.token.status === 'pending';
+}
+
+const PROVIDER_PAGE_LIMIT = MAX_PAGE_LIMIT;
+/** 50 pages of 100: far past any real registry, short of an endless loop. */
+export const MAX_PROVIDER_PAGES = 50;
 
 /**
  * Every public model whose provider is `wallet`. The registry lists active and
- * paused models, so a paused model stays visible to its owner.
+ * paused models, so a paused model stays visible to its owner. `GET
+ * /api/models` takes only `cursor`/`limit` (no provider filter), so this pages
+ * through the registry, stopping at `MAX_PROVIDER_PAGES` or when the cursor
+ * stops advancing.
  */
 export function useProviderModels(wallet: string | null) {
   return useQuery({
@@ -113,15 +128,17 @@ export function useProviderModels(wallet: string | null) {
         ? skipToken
         : async ({ signal }) => {
             const owned: Model[] = [];
+            const seen = new Set<string>();
             let cursor: string | null = null;
-            do {
-              const page: ListModelsResponse = await apiFetch<ListModelsResponse>(
-                `/api/models${pageQuery(cursor, PROVIDER_PAGE_LIMIT)}`,
-                { signal },
+            for (let page = 0; page < MAX_PROVIDER_PAGES; page += 1) {
+              const { items, nextCursor } = ListModelsResponseSchema.parse(
+                await apiFetch(`/api/models${pageQuery(cursor, PROVIDER_PAGE_LIMIT)}`, { signal }),
               );
-              owned.push(...page.items.filter((model) => model.providerWallet === wallet));
-              cursor = page.nextCursor;
-            } while (cursor !== null);
+              owned.push(...items.filter((model) => model.providerWallet === wallet));
+              if (nextCursor === null || seen.has(nextCursor)) break;
+              seen.add(nextCursor);
+              cursor = nextCursor;
+            }
             return owned;
           },
   });

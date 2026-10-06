@@ -77,6 +77,8 @@ const modelSchema = new Schema(
     pricing: { type: pricingSchema, required: true },
     splits: { type: splitsSchema, required: true, default: () => ({}) },
     status: { type: String, enum: ModelStatusSchema.options, required: true, default: 'active' },
+    /** Who paused the model; only an `owner` pause may be resumed by the owner (API-02). */
+    pausedBy: { type: String, enum: ['owner', 'admin', 'health'], default: null },
     health: { type: healthSchema, required: true, default: () => ({}) },
     token: { type: tokenSchema, required: true, default: () => ({}) },
     stats: { type: statsSchema, required: true, default: () => ({}) },

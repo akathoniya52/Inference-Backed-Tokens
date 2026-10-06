@@ -7,6 +7,8 @@ export interface RateLimitOptions {
   windowMs?: number;
   /** Defaults to the client IP (honours `trust proxy`). */
   keyGenerator?: (req: Parameters<RequestHandler>[0]) => string;
+  /** `RateLimit` headers (default on); off for a limiter stacked behind another. */
+  headers?: boolean;
 }
 
 /** Fixed-window limiter that answers with the 429 `rate_limited` envelope. */
@@ -14,11 +16,12 @@ export function createRateLimit({
   limit,
   windowMs = 60_000,
   keyGenerator,
+  headers = true,
 }: RateLimitOptions): RequestHandler {
   return rateLimit({
     windowMs,
     limit,
-    standardHeaders: 'draft-8',
+    standardHeaders: headers ? 'draft-8' : false,
     legacyHeaders: false,
     ...(keyGenerator ? { keyGenerator } : {}),
     handler: (_req, _res, next) => {

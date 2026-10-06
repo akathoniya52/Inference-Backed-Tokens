@@ -11,6 +11,19 @@ describe('startSelfPing', () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ['https://host.test/api', undefined, 'https://host.test/api/healthz'],
+    ['https://host.test/api/', undefined, 'https://host.test/api/healthz'],
+    ['https://host.test', undefined, 'https://host.test/healthz'],
+    ['https://host.test/api', 'health/live', 'https://host.test/api/health/live'],
+  ])('keeps the path of base %s (DB-08)', async (baseUrl, path, expected) => {
+    const fetch = vi.fn<SelfPingFetch>().mockResolvedValue({ ok: true, status: 200 });
+    const selfPing = startSelfPing({ baseUrl, path, logger: fakeLogger(), fetch });
+    await selfPing.ping();
+    selfPing.stop();
+    expect(fetch.mock.calls[0]?.[0]).toBe(expected);
+  });
+
   it('does nothing without a base URL', async () => {
     const fetch = vi.fn<SelfPingFetch>();
     const logger = fakeLogger();

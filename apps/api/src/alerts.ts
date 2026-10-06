@@ -15,26 +15,42 @@ export const ERROR_RATE_MIN_SAMPLE = 50;
 export const REJECTED_DEPOSITS_WINDOW_MS = 60 * 60 * 1000;
 export const REJECTED_DEPOSITS_THRESHOLD = 5;
 
-class RollingWindow {
-  private readonly times: number[] = [];
+const BUCKET_MS = 1000;
 
-  constructor(private readonly windowMs: number) {}
+/**
+ * API-13: a ring of per-second counters over the window, so memory is fixed
+ * (one slot per second) and every call is O(window seconds) at worst, whatever
+ * the request rate.
+ */
+class RollingCounter {
+  private readonly seconds: number[];
+  private readonly counts: number[];
+
+  constructor(windowMs: number) {
+    const slots = Math.max(1, Math.ceil(windowMs / BUCKET_MS));
+    this.seconds = new Array<number>(slots).fill(-1);
+    this.counts = new Array<number>(slots).fill(0);
+  }
 
   add(now: number): void {
-    this.times.push(now);
-    this.prune(now);
+    const second = Math.floor(now / BUCKET_MS);
+    const slot = second % this.seconds.length;
+    if (this.seconds[slot] !== second) {
+      this.seconds[slot] = second;
+      this.counts[slot] = 0;
+    }
+    this.counts[slot] = (this.counts[slot] ?? 0) + 1;
   }
 
   count(now: number): number {
-    this.prune(now);
-    return this.times.length;
-  }
-
-  private prune(now: number): void {
-    const cutoff = now - this.windowMs;
-    let stale = 0;
-    while (stale < this.times.length && (this.times[stale] ?? 0) <= cutoff) stale += 1;
-    if (stale > 0) this.times.splice(0, stale);
+    const second = Math.floor(now / BUCKET_MS);
+    const oldest = second - this.seconds.length;
+    let total = 0;
+    for (let slot = 0; slot < this.seconds.length; slot += 1) {
+      const at = this.seconds[slot] ?? -1;
+      if (at > oldest && at <= second) total += this.counts[slot] ?? 0;
+    }
+    return total;
   }
 }
 
@@ -48,6 +64,11 @@ export interface ModelPausedEvent {
 export interface ApiAlerts {
   recordResponse(status: number): void;
   recordRejectedDeposit(): void;
+  /**
+   * API-12: counts this response as a 5xx even though its status line already
+   * went out (an error after the headers, a failed stream).
+   */
+  markFailed(res: object): void;
   modelPaused(event: ModelPausedEvent): void;
   middleware(): RequestHandler;
 }
@@ -63,9 +84,10 @@ export interface ApiAlertsDeps {
  * stays quiet until it has cleared, so a sustained outage is one alert.
  */
 export function createApiAlerts({ alerter, clock, logger }: ApiAlertsDeps): ApiAlerts {
-  const responses = new RollingWindow(ERROR_RATE_WINDOW_MS);
-  const serverErrors = new RollingWindow(ERROR_RATE_WINDOW_MS);
-  const rejectedDeposits = new RollingWindow(REJECTED_DEPOSITS_WINDOW_MS);
+  const responses = new RollingCounter(ERROR_RATE_WINDOW_MS);
+  const serverErrors = new RollingCounter(ERROR_RATE_WINDOW_MS);
+  const rejectedDeposits = new RollingCounter(REJECTED_DEPOSITS_WINDOW_MS);
+  const failed = new WeakSet<object>();
   let errorRateTripped = false;
   let depositsTripped = false;
 
@@ -109,15 +131,25 @@ export function createApiAlerts({ alerter, clock, logger }: ApiAlertsDeps): ApiA
       depositsTripped = over;
     },
 
+    markFailed(res) {
+      failed.add(res);
+    },
+
     modelPaused(event) {
       send('error', 'model paused', event);
     },
 
     middleware() {
       return (_req, res, next) => {
-        res.on('finish', () => {
-          api.recordResponse(res.statusCode);
-        });
+        let recorded = false;
+        // `close` without `finish` is a destroyed response (an error mid-stream).
+        const record = (): void => {
+          if (recorded) return;
+          recorded = true;
+          api.recordResponse(failed.has(res) ? 500 : res.statusCode);
+        };
+        res.on('finish', record);
+        res.on('close', record);
         next();
       };
     },

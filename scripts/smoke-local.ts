@@ -17,7 +17,6 @@ import { USDC_MINT } from '@ibt/chain';
 import { ALL_MODELS, connectDb, connection, disconnectDb } from '@ibt/db';
 import {
   CreateApiKeyResponseSchema,
-  DAMM_V2_FEE_CONFIG,
   LedgerResponseSchema,
   MeResponseSchema,
   microToUsdcString,
@@ -362,7 +361,6 @@ async function smoke(): Promise<void> {
   };
   const keeperEnv: NodeJS.ProcessEnv = {
     ...apiEnv,
-    DAMM_V2_FEE_CONFIG,
     KEEPER_SECRET_KEY: bs58.encode(keeperKey.secretKey),
     TREASURY_SECRET_KEY: bs58.encode(treasuryKey.secretKey),
     API_INTERNAL_URL: apiUrl,

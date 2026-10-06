@@ -126,6 +126,45 @@ describe('ApiKeyManager', () => {
     expect(document.body.textContent).not.toContain(FULL_KEY);
   });
 
+  it('traps focus, warns before an accidental close and before leaving the page', async () => {
+    routes.push((url, init) => {
+      if (url.pathname !== '/api/keys') return undefined;
+      if (init?.method === 'POST') {
+        return json(201, { ...apiKey(1, { name: 'production' }), key: FULL_KEY });
+      }
+      return json(200, { items: [], nextCursor: null });
+    });
+    renderManager();
+    await screen.findByText(/No keys yet/);
+    fireEvent.change(screen.getByLabelText('Key name'), { target: { value: 'production' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
+
+    const dialog = await screen.findByRole('dialog');
+    const copyButton = within(dialog).getByRole('button', { name: 'Copy key' });
+    const done = within(dialog).getByRole('button', { name: 'I have saved it' });
+    expect(document.activeElement).toBe(done);
+    fireEvent.keyDown(done, { key: 'Tab' });
+    expect(document.activeElement).toBe(copyButton);
+    fireEvent.keyDown(copyButton, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(done);
+
+    const unload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(within(dialog).getByText(/Close without saving\?/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Keep it open' }));
+    expect(within(dialog).getByTestId('full-api-key').textContent).toBe(FULL_KEY);
+
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close anyway' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const after = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(after);
+    expect(after.defaultPrevented).toBe(false);
+  });
+
   it('revokes a key after confirmation', async () => {
     let revoked = false;
     routes.push((url, init) => {

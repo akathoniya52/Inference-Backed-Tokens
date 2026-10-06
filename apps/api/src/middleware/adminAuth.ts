@@ -34,6 +34,21 @@ export function loopbackAllowlistBehindProxy(
 }
 
 /**
+ * API-01: any allowlist is spoofable from a direct connection while `trust proxy`
+ * believes every hop (`true`) or a hop count, since the client writes the
+ * left-most `X-Forwarded-For` entries. A subnet list trusts only named proxies.
+ */
+export function allowlistTrustsAnyHop(
+  env: Pick<ApiEnv, 'ADMIN_IP_ALLOWLIST' | 'TRUST_PROXY'>,
+): boolean {
+  const trust = env.TRUST_PROXY;
+  return (
+    env.ADMIN_IP_ALLOWLIST.length > 0 &&
+    (trust === true || (typeof trust === 'number' && trust > 0))
+  );
+}
+
+/**
  * `/api/admin/*` (L230): the client IP (`req.ip`, so `trust proxy` applies)
  * must be in `ADMIN_IP_ALLOWLIST` (empty = any), then the bearer must equal
  * `ADMIN_TOKEN`. Both sides are hashed first so `timingSafeEqual` compares

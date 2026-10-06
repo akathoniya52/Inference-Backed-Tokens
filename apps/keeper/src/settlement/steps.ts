@@ -7,7 +7,15 @@ import {
   type SettlementDoc,
   type Types,
 } from '@ibt/db';
-import { NATIVE_MINT, type AddAndLockResult, type PositionKeys } from '@ibt/chain';
+import {
+  NATIVE_MINT,
+  derivePositionAddress,
+  derivePositionNftAccount,
+  ownerTokenDelta,
+  type AddAndLockResult,
+  type PositionKeys,
+  type SwapFillRef,
+} from '@ibt/chain';
 import {
   LAMPORTS_PER_SOL,
   ceilDiv,
@@ -28,6 +36,8 @@ import {
   pendingChainStepOf,
   pendingStepKey,
   pendingTxOutcome,
+  priorSignatures,
+  resolvePendingTx,
   sendWithPendingTx,
 } from './pendingTx.js';
 
@@ -74,6 +84,17 @@ export class NonRetryableSettlementError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'NonRetryableSettlementError';
+  }
+}
+
+/**
+ * The step cannot run in this run (e.g. the payout does not fit the run's budget). The
+ * engine stops the settlement without counting an attempt; the next run resumes it.
+ */
+export class SettlementDeferredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SettlementDeferredError';
   }
 }
 
@@ -218,7 +239,11 @@ async function reservePayout(
   const accrued = share + carry;
   const amount = payoutAmount(ctx, accrued);
   // Taken before the first await so the run's concurrent settlements see it at once.
-  if (ctx.payoutBudget) ctx.payoutBudget.remainingMicroUsdc -= amount;
+  const id = settlement._id.toHexString();
+  if (ctx.payoutBudget) {
+    ctx.payoutBudget.remainingMicroUsdc -= amount;
+    ctx.payoutBudget.charged.add(id);
+  }
   try {
     await withTransaction(async (session) => {
       const { matchedCount } = await Models.updateOne(
@@ -233,9 +258,30 @@ async function reservePayout(
       await saveIf(settlement, AMOUNTS_OPEN, session);
     });
   } catch (err) {
-    if (ctx.payoutBudget) ctx.payoutBudget.remainingMicroUsdc += amount;
+    if (ctx.payoutBudget) {
+      ctx.payoutBudget.remainingMicroUsdc += amount;
+      ctx.payoutBudget.charged.delete(id);
+    }
     throw err;
   }
+}
+
+/**
+ * G18 at send time (KPR-06): a payout reserved by an earlier run (resumed) is charged
+ * against this run's budget before it is sent, and deferred to a later run if it does not
+ * fit. One reserved in this run was charged by `reservePayout` already.
+ */
+function chargePayoutAtSend(ctx: KeeperCtx, settlement: SettlementDoc, amount: bigint): void {
+  const budget = ctx.payoutBudget;
+  const id = settlement._id.toHexString();
+  if (!budget || budget.charged.has(id)) return;
+  if (amount > budget.remainingMicroUsdc) {
+    throw new SettlementDeferredError(
+      `payout ${microToUsdcString(amount)} USDC exceeds what this run may still pay`,
+    );
+  }
+  budget.remainingMicroUsdc -= amount;
+  budget.charged.add(id);
 }
 
 /**
@@ -255,9 +301,10 @@ export const payProvider: SettlementStep = async (ctx, settlement) => {
   let signature: string | null = null;
   if (amount > 0n) {
     const wallet = new PublicKey(provider.wallet);
-    ({ signature } = await sendWithPendingTx(ctx, settlement, 'payProvider', (opts) =>
-      ctx.chain.transferUsdc(ctx.treasury, wallet, amount, opts),
-    ));
+    ({ signature } = await sendWithPendingTx(ctx, settlement, 'payProvider', (opts) => {
+      chargePayoutAtSend(ctx, settlement, amount);
+      return ctx.chain.transferUsdc(ctx.treasury, wallet, amount, opts);
+    }));
   }
 
   settlement.provider.txSignature = signature;
@@ -273,8 +320,12 @@ export const payProvider: SettlementStep = async (ctx, settlement) => {
 /** Sanity bounds for the SOL price source (E5); a price outside them is never spent at. */
 export const SOL_PRICE_MIN_USD = 1;
 export const SOL_PRICE_MAX_USD = 100_000;
-/** Largest move, in percent, from the price the last converted settlement stored. */
+/** Largest move, in percent, from a fresh reference price (the last converted settlement's). */
 export const SOL_PRICE_MAX_DEVIATION_PCT = 30n;
+/** The allowed move widens by this many percentage points per full hour of reference age. */
+export const SOL_PRICE_DEVIATION_PCT_PER_HOUR = 10n;
+/** A reference older than this no longer bounds the price (only the absolute bounds apply). */
+export const SOL_PRICE_REFERENCE_MAX_AGE_MS = 6 * 3_600_000;
 
 /** The SOL price failed a sanity check; retried, and nothing is spent at it. */
 export class SolPriceRejectedError extends Error {
@@ -292,15 +343,28 @@ export function solPriceMicro(usdPerSol: number): bigint {
   return BigInt(Math.round(usdPerSol * 1e6));
 }
 
-async function lastStoredSolPriceMicro(): Promise<bigint | null> {
+/**
+ * The most recently priced settlement's SOL price and its age (KPR-04): ordered by
+ * `liquidity.pricedAt`, which only `convert` writes, so later writes to an old settlement
+ * (retry, fail, finalize) never make its stale price the reference.
+ */
+async function lastStoredSolPrice(): Promise<{ priceMicro: bigint; pricedAt: Date } | null> {
   const last = await Settlements.findOne(
-    { 'liquidity.solPriceUsdc': { $ne: null } },
-    { 'liquidity.solPriceUsdc': 1 },
+    { 'liquidity.solPriceUsdc': { $ne: null }, 'liquidity.pricedAt': { $ne: null } },
+    { 'liquidity.solPriceUsdc': 1, 'liquidity.pricedAt': 1 },
   )
-    .sort({ updatedAt: -1 })
+    .sort({ 'liquidity.pricedAt': -1 })
     .lean();
   const stored = last?.liquidity.solPriceUsdc;
-  return stored ? usdcStringToMicro(stored) : null;
+  const pricedAt = last?.liquidity.pricedAt;
+  return stored && pricedAt ? { priceMicro: usdcStringToMicro(stored), pricedAt } : null;
+}
+
+/** Allowed move in percent for a reference `ageMs` old; `null` when it is too old to bound. */
+export function allowedSolPriceDeviationPct(ageMs: number): bigint | null {
+  if (ageMs > SOL_PRICE_REFERENCE_MAX_AGE_MS) return null;
+  const hours = BigInt(Math.floor(Math.max(ageMs, 0) / 3_600_000));
+  return SOL_PRICE_MAX_DEVIATION_PCT + hours * SOL_PRICE_DEVIATION_PCT_PER_HOUR;
 }
 
 /** The source price as micro-USDC per SOL, after the E5 checks; a rejection alerts and throws. */
@@ -310,11 +374,15 @@ async function checkedSolPriceMicro(ctx: KeeperCtx, settlement: SettlementDoc): 
   if (!(usdPerSol >= SOL_PRICE_MIN_USD && usdPerSol <= SOL_PRICE_MAX_USD)) {
     reason = `${usdPerSol} USD is outside [${SOL_PRICE_MIN_USD}, ${SOL_PRICE_MAX_USD}]`;
   } else {
-    const last = await lastStoredSolPriceMicro();
+    const reference = await lastStoredSolPrice();
     const priceMicro = solPriceMicro(usdPerSol);
-    const move = last === null ? 0n : priceMicro > last ? priceMicro - last : last - priceMicro;
-    if (last !== null && move * 100n > last * SOL_PRICE_MAX_DEVIATION_PCT) {
-      reason = `${usdPerSol} USD moved more than ${SOL_PRICE_MAX_DEVIATION_PCT}% from the last stored ${microToUsdcString(last)}`;
+    const allowed = reference
+      ? allowedSolPriceDeviationPct(ctx.clock.now().getTime() - reference.pricedAt.getTime())
+      : null;
+    const last = reference?.priceMicro ?? 0n;
+    const move = priceMicro > last ? priceMicro - last : last - priceMicro;
+    if (reference && allowed !== null && move * 100n > last * allowed) {
+      reason = `${usdPerSol} USD moved more than ${allowed}% from the last stored ${microToUsdcString(last)}`;
     } else {
       return priceMicro;
     }
@@ -410,6 +478,7 @@ export const convert: SettlementStep = async (ctx, settlement) => {
     if (matchedCount !== 1)
       throw new Error(`slice carry-over of model ${model.slug} changed mid-run`);
     settlement.liquidity.solPriceUsdc = microToUsdcString(priceMicro);
+    settlement.liquidity.pricedAt = ctx.clock.now();
     settlement.liquidity.solLamports = lamports;
     if (dust) {
       settlement.liquidity.phase = 'none';
@@ -464,6 +533,41 @@ async function recoveredTokens(ctx: KeeperCtx, model: ModelRow): Promise<bigint>
   return balance > escrow ? balance - escrow : 0n;
 }
 
+interface Fill {
+  tokens: bigint;
+  /** Input actually taken (lamports). */
+  spent: bigint;
+}
+
+/**
+ * Actual amounts of a swap recovered from a landed `pendingTx` without its result (CHN-03).
+ * When the chain cannot read the tx back, the tokens fall back to the keeper's balance
+ * above escrow and the input to the full request, so no lamports are ever credited back
+ * that the swap might have spent; that fallback is alerted.
+ */
+async function recoveredFill(
+  ctx: KeeperCtx,
+  settlement: SettlementDoc,
+  model: ModelRow,
+  signature: string,
+  ref: SwapFillRef,
+  requested: bigint,
+): Promise<Fill> {
+  try {
+    const fill = await ctx.chain.swapFill(signature, ref);
+    return { tokens: fill.amountOut, spent: fill.amountIn };
+  } catch (err) {
+    const body = {
+      settlementId: settlement._id.toHexString(),
+      signature,
+      error: err instanceof Error ? err.message : String(err),
+    };
+    ctx.logger.warn(body, 'swap fill unreadable; using the balance-based estimate');
+    await ctx.alerter.alert('warn', 'swap fill unreadable; amounts estimated', body);
+    return { tokens: await recoveredTokens(ctx, model), spent: requested };
+  }
+}
+
 /** Curve buy (PartialFill): spends at most the room left on the curve, the rest compounds. */
 async function buyOnCurve(
   ctx: KeeperCtx,
@@ -481,20 +585,33 @@ async function buyOnCurve(
     settlement.liquidity.solAddedLamports = room > 0n ? min(lamports, room) : 0n;
     await saveIf(settlement, { lastCompletedState: 'converted', pendingTx: null });
   }
-  const spend = settlement.liquidity.solAddedLamports;
+  const requested = settlement.liquidity.solAddedLamports;
 
   let signature: string | null = null;
   let tokens = 0n;
-  if (spend > 0n) {
+  let spend = 0n;
+  if (requested > 0n) {
     const sent = await sendWithPendingTx(
       ctx,
       settlement,
       'buyAndLock',
-      (opts) => ctx.chain.curveBuy(ctx.keeper, pool, spend, opts),
+      (opts) => ctx.chain.curveBuy(ctx.keeper, pool, requested, opts),
       ['curveBuy'],
     );
     signature = sent.signature;
-    tokens = sent.result ? sent.result.outAmount : await recoveredTokens(ctx, model);
+    // Actual amounts (CHN-03): a partial fill takes fewer lamports than requested.
+    const fill = sent.result
+      ? { tokens: sent.result.outAmount, spent: sent.result.lamportsSpent }
+      : await recoveredFill(
+          ctx,
+          settlement,
+          model,
+          sent.signature,
+          { venue: 'curve', owner: ctx.keeper.publicKey, pool },
+          requested,
+        );
+    tokens = fill.tokens;
+    spend = min(fill.spent, requested);
   }
 
   await withTransaction(async (session) => {
@@ -510,6 +627,7 @@ async function buyOnCurve(
     );
     settlement.liquidity.buyTxSignature = signature;
     settlement.liquidity.tokensBaseUnits = tokens;
+    settlement.liquidity.solAddedLamports = spend;
     settlement.pendingTx = null;
     completeState(settlement, 'bought');
     await saveIf(settlement, { lastCompletedState: 'converted' }, session);
@@ -539,7 +657,22 @@ async function curveNeedsMigration(
   );
 }
 
-/** L178: a buy that completes the curve migrates it in the same run. */
+/**
+ * Releases the model's `migrationSignature` if it is still one of `signatures`, migrates
+ * that provably did not land; one the pool poller (or anyone) landed meanwhile is kept.
+ */
+async function releaseMigrationSignature(model: ModelRow, signatures: string[]): Promise<void> {
+  await Models.updateOne(
+    { _id: model._id, 'token.migrationSignature': { $in: signatures } },
+    { $set: { 'token.migrationSignature': null } },
+  );
+}
+
+/**
+ * L178: a buy that completes the curve migrates it in the same run. A stored migrate that
+ * did not land is resolved first, and the pool is re-read before anything is sent (KPR-02):
+ * the pool poller may have migrated it meanwhile.
+ */
 async function migrateIfComplete(
   ctx: KeeperCtx,
   settlement: SettlementDoc,
@@ -547,7 +680,17 @@ async function migrateIfComplete(
   pool: PublicKey,
 ): Promise<void> {
   let signature: string | null = null;
-  if (settlement.pendingTx || (await curveNeedsMigration(ctx, model, pool))) {
+  const stored = settlement.pendingTx?.signature ?? null;
+  if (settlement.pendingTx) {
+    signature = await resolvePendingTx(ctx, settlement, 'buyAndLock', ['migrate']);
+    if (!signature && stored) {
+      // A re-signed send (CHN-01) may have stored any of its signatures on the model.
+      const priors = await priorSignatures(settlement, 'buyAndLock', ['migrate']);
+      await releaseMigrationSignature(model, [...priors, stored]);
+    }
+  }
+  if (!signature && (await curveNeedsMigration(ctx, model, pool))) {
+    let ownSignature: string | null = null;
     ({ signature } = await sendWithPendingTx(
       ctx,
       settlement,
@@ -557,13 +700,13 @@ async function migrateIfComplete(
           ...opts,
           onSigned: async (sig, lastValidBlockHeight, chainStep) => {
             await opts.onSigned?.(sig, lastValidBlockHeight, chainStep);
-            await withTransaction((session) =>
-              Models.updateOne(
-                { _id: model._id },
-                { $set: { 'token.migrationSignature': sig } },
-                { session },
-              ),
+            // CAS on null or this send's previous signature (CHN-01 re-sign): never clobber a
+            // migration signature someone else stored, but always track this send's latest tx.
+            await Models.updateOne(
+              { _id: model._id, 'token.migrationSignature': { $in: [null, ownSignature] } },
+              { $set: { 'token.migrationSignature': sig } },
             );
+            ownSignature = sig;
           },
         }),
       ['migrate'],
@@ -592,6 +735,7 @@ async function swapHalfIfNoEscrow(
   const swapIn = model.token.escrowBaseUnits === 0n ? lamports / 2n : 0n;
   let signature: string | null = null;
   let tokens = 0n;
+  let unspent = 0n;
   if (swapIn > 0n) {
     const mint = tokenMint(model);
     const sent = await sendWithPendingTx(
@@ -603,14 +747,26 @@ async function swapHalfIfNoEscrow(
       ['dammSwap'],
     );
     signature = sent.signature;
-    tokens = sent.result ? sent.result.outAmount : await recoveredTokens(ctx, model);
+    const fill = sent.result
+      ? { tokens: sent.result.outAmount, spent: sent.result.amountIn }
+      : await recoveredFill(
+          ctx,
+          settlement,
+          model,
+          sent.signature,
+          { venue: 'damm', owner: ctx.keeper.publicKey, mint, inputMint: NATIVE_MINT },
+          swapIn,
+        );
+    tokens = fill.tokens;
+    unspent = swapIn - min(fill.spent, swapIn);
   }
 
   await withTransaction(async (session) => {
-    if (tokens > 0n) {
+    if (tokens > 0n || unspent > 0n) {
+      // Lamports the swap did not take compound into the next run (CHN-03).
       await Models.updateOne(
         { _id: model._id },
-        { $inc: { 'token.escrowBaseUnits': tokens } },
+        { $inc: { 'token.escrowBaseUnits': tokens, 'token.pendingCompoundLamports': unspent } },
         { session },
       );
     }
@@ -619,6 +775,39 @@ async function swapHalfIfNoEscrow(
     completeState(settlement, 'bought');
     await saveIf(settlement, { lastCompletedState: 'converted' }, session);
   });
+}
+
+/**
+ * Keys of the position a landed create-and-add opened (KPR-03): its NFT mint is the one
+ * signer besides the keeper. `null` when the tx cannot be read or is ambiguous.
+ */
+async function positionKeysFromAddTx(
+  ctx: KeeperCtx,
+  addSignature: string,
+): Promise<PositionKeys | null> {
+  const tx = await ctx.chain.getParsedTx(addSignature);
+  if (!tx || tx.meta?.err !== null) return null;
+  const nfts = tx.transaction.message.accountKeys.filter(
+    (key) => key.signer && !key.pubkey.equals(ctx.keeper.publicKey),
+  );
+  const nft = nfts.length === 1 ? nfts[0]?.pubkey : undefined;
+  return nft
+    ? { position: derivePositionAddress(nft), positionNftAccount: derivePositionNftAccount(nft) }
+    : null;
+}
+
+/** Stores a new keeper position on the model unless one is already recorded. */
+async function recordKeeperPosition(model: ModelRow, keys: PositionKeys): Promise<void> {
+  await Models.updateOne(
+    { _id: model._id, 'token.keeperPosition': null },
+    {
+      $set: {
+        'token.keeperPosition': keys.position.toBase58(),
+        'token.keeperPositionNftAccount': keys.positionNftAccount.toBase58(),
+      },
+    },
+    { strict: false },
+  );
 }
 
 type AddLockOutcome = Pick<
@@ -652,14 +841,26 @@ async function resumeAddAndLock(
     return null;
   }
   if (chainStep === 'lock' && outcome === 'landed' && addSignature) {
-    const balance = await ctx.chain.tokenBalance(ctx.keeper.publicKey, tokenMint(model));
+    const mint = tokenMint(model);
+    const addTx = await ctx.chain.getParsedTx(addSignature);
+    const balance = await ctx.chain.tokenBalance(ctx.keeper.publicKey, mint);
     const escrow = model.token.escrowBaseUnits;
+    // Tokens the add took, from the tx itself when readable, else the escrow balance drop.
+    const fromTx = addTx?.meta ? -ownerTokenDelta(addTx, ctx.keeper.publicKey, mint) : null;
+    const keys = keeperPosition(model) ?? (await positionKeysFromAddTx(ctx, addSignature));
+    if (!keys) {
+      await ctx.alerter.alert('error', 'keeper position keys unknown after a resumed add', {
+        settlementId: settlement._id.toHexString(),
+        addSignature,
+      });
+    }
     return {
       addSignature,
       lockSignature: pending.signature,
       lamportsUsed: addLamports,
-      tokensUsed: escrow > balance ? escrow - balance : 0n,
-      keys: keeperPosition(model),
+      tokensUsed:
+        fromTx !== null && fromTx >= 0n ? fromTx : escrow > balance ? escrow - balance : 0n,
+      keys,
     };
   }
   throw new LiquidityUnlockedError(addSignature ?? pending.signature);
@@ -692,10 +893,15 @@ async function addAndLockLiquidity(
             ...opts,
             onSigned: async (sig, lastValidBlockHeight, chainStep) => {
               // The add confirmed before the lock was built, so keep its signature.
-              if (chainStep === 'lock' && settlement.pendingTx) {
-                settlement.liquidity.addTxSignature = settlement.pendingTx.signature;
-              }
+              const addSignature = chainStep === 'lock' ? settlement.pendingTx?.signature : null;
+              if (addSignature) settlement.liquidity.addTxSignature = addSignature;
               await opts.onSigned?.(sig, lastValidBlockHeight, chainStep);
+              // A new position's keys are stored before its lock is sent (KPR-03), so a
+              // crash after the lock still records the position for fee claims.
+              if (addSignature && !position) {
+                const keys = await positionKeysFromAddTx(ctx, addSignature);
+                if (keys) await recordKeeperPosition(model, keys);
+              }
             },
           },
         );
@@ -920,7 +1126,7 @@ export const finalize: SettlementStep = async (_ctx, settlement) => {
     settlement.pendingTx = null;
     settlement.error = null;
     completeState(settlement, 'done');
-    await settlement.save({ session });
+    await saveIf(settlement, { lastCompletedState: 'locked' }, session);
   });
 };
 

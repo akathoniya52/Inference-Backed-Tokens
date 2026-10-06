@@ -37,8 +37,30 @@ export interface PositionRef {
 
 export interface LiquidityAmounts {
   liquidityDelta: bigint;
+  /** Most of each token the add may take: the on-chain threshold and the SOL wrapped. */
   maxAmountTokenA: bigint;
   maxAmountTokenB: bigint;
+}
+
+const BPS = 10_000n;
+
+/** Throws unless `bps` is a whole number of basis points in 0..9999. */
+export function assertSlippageBps(bps: number): void {
+  if (!Number.isInteger(bps) || bps < 0 || bps >= Number(BPS)) {
+    throw new RangeError(`slippageBps must be an integer in 0..9999, got ${bps}`);
+  }
+}
+
+/** `amount` plus `bps` basis points, rounded up: a maximum-in threshold with slippage room. */
+export function withSlippageUp(amount: bigint, bps: number): bigint {
+  assertSlippageBps(bps);
+  return (amount * (BPS + BigInt(bps)) + BPS - 1n) / BPS;
+}
+
+/** The largest amount whose `withSlippageUp` stays within `cap`. */
+export function maxBeforeSlippage(cap: bigint, bps: number): bigint {
+  assertSlippageBps(bps);
+  return (cap * BPS) / (BPS + BigInt(bps));
 }
 
 export interface SwapQuote {
@@ -98,11 +120,13 @@ export async function quoteSwap(
     slippageBps = 0,
   }: { inputMint: PublicKey; amountIn: bigint; slippageBps?: number },
 ): Promise<SwapQuote> {
+  assertSlippageBps(slippageBps);
   const { state } = pool;
   const currentPoint = await getDammCurrentPoint(connection, state.activationType);
   const quote = cpAmm(connection).getQuote2({
     inputTokenMint: inputMint,
-    slippage: slippageBps / 100,
+    // cp-amm 1.5.1 `getAmountWithSlippage(amount, slippageBps)`: basis points, not percent.
+    slippage: slippageBps,
     currentPoint,
     poolState: state,
     tokenADecimal: decimalsOf(state.tokenAMint),
@@ -197,12 +221,20 @@ export interface CreatePositionTx {
   positionNftAccount: PublicKey;
 }
 
-/** The SDK wraps SOL into the owner's WSOL ATA and closes it afterwards. */
+/**
+ * The SDK wraps SOL into the owner's WSOL ATA and closes it afterwards. Pass the same
+ * `positionNft` when rebuilding, so a rebuilt tx cannot open a second position.
+ */
 export async function buildCreatePositionAndAdd(
   connection: Connection,
-  { owner, pool, ...amounts }: { owner: PublicKey; pool: DammPool } & LiquidityAmounts,
+  {
+    owner,
+    pool,
+    positionNft,
+    ...amounts
+  }: { owner: PublicKey; pool: DammPool; positionNft?: Keypair } & LiquidityAmounts,
 ): Promise<CreatePositionTx> {
-  const nft = Keypair.generate();
+  const nft = positionNft ?? Keypair.generate();
   const transaction = await cpAmm(connection).createPositionAndAddLiquidity({
     owner,
     pool: pool.address,

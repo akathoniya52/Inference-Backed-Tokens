@@ -1,6 +1,6 @@
 import { FakePriceSource } from '@ibt/chain';
 import type { FakeChainMethod } from '@ibt/chain/testing';
-import { Leases, Models, Settlements, type SettlementDoc, type Types } from '@ibt/db';
+import { Leases, Models, Requests, Settlements, Types, type SettlementDoc } from '@ibt/db';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { KeeperCtx, LeaseGuard } from '../src/ctx.js';
@@ -92,11 +92,18 @@ describe('settlement money safety (E1–E7)', () => {
     (await ctx.chain.landedTxs({ settlementRef: doc._id.toHexString(), method })).length;
 
   /** Delists every other model so a run settles only `models` (earlier tests leave requests). */
-  const onlyRun = (models: TestModel[]) =>
-    Models.updateMany(
-      { _id: { $nin: models.map((m) => m.model._id) } },
-      { $set: { status: 'delisted' } },
+  /**
+   * Delists every other model and tags their billed requests, since a delisted model with
+   * unsettled billed requests is still settled (KPR-09).
+   */
+  const onlyRun = async (models: TestModel[]) => {
+    const others = { $nin: models.map((m) => m.model._id) };
+    await Models.updateMany({ _id: others }, { $set: { status: 'delisted' } });
+    await Requests.updateMany(
+      { modelId: others, settlementId: null },
+      { $set: { settlementId: new Types.ObjectId() } },
     );
+  };
 
   const carryOf = async (modelId: Types.ObjectId) =>
     (await Models.findById(modelId).lean())?.token.carryOverMicroUsdc;

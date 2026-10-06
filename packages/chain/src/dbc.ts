@@ -1,8 +1,20 @@
 import { AppError } from '@ibt/shared';
-import type { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import type {
+  Connection,
+  Keypair,
+  ParsedInstruction,
+  ParsedTransactionWithMeta,
+  PartiallyDecodedInstruction,
+  PublicKey,
+  Transaction,
+} from '@solana/web3.js';
+import bs58 from 'bs58';
+
+import { readTokenMetadata } from './metadata.js';
 
 import {
   DAMM_V2_CONFIG_100_BPS,
+  DBC_PROGRAM_ID,
   deriveDbcPoolAddress,
   DynamicBondingCurveClient,
   getCurrentPoint,
@@ -21,6 +33,8 @@ export interface VirtualPoolFields {
     config: PublicKey;
     creator: PublicKey;
     baseMint: PublicKey;
+    baseVault: PublicKey;
+    quoteVault: PublicKey;
     quoteReserve: Integer;
     baseReserve: Integer;
     isMigrated: number;
@@ -110,32 +124,136 @@ export async function readPool(connection: Connection, ref: PoolRef): Promise<Db
   return found && normalizePool(address, found.pool, found.config);
 }
 
+export interface ExpectedTokenMetadata {
+  name?: string;
+  symbol?: string;
+  uri?: string;
+}
+
 export interface VerifyLaunchInput {
   signature: string;
   mint: PublicKey;
   expectedConfig: PublicKey;
   expectedCreator: PublicKey;
+  /** When set, the mint's Metaplex metadata must exist and match every given field exactly (API-06). */
+  expectedMetadata?: ExpectedTokenMetadata;
 }
 
-const mismatch = (reason: string) => new AppError('pool_mismatch', { details: { reason } });
+/**
+ * `details.reason` of the `pool_mismatch` thrown by `verifyLaunch`. `tx_*` bind the
+ * signature, `pool_not_found`/`config`/`creator` check the pool, `metadata_*` the token.
+ */
+export type LaunchMismatchReason =
+  | 'tx_not_found'
+  | 'tx_failed'
+  | 'tx_not_launch'
+  | 'pool_not_found'
+  | 'config'
+  | 'creator'
+  | 'metadata_not_found'
+  | 'metadata_name'
+  | 'metadata_symbol'
+  | 'metadata_uri';
 
-/** Accepts a launch only if the tx succeeded and the pool has our config and the owner as creator (L122, L524). */
+const mismatch = (reason: LaunchMismatchReason) =>
+  new AppError('pool_mismatch', { details: { reason } });
+
+/**
+ * Anchor discriminators of DBC's `initialize_virtual_pool_with_{spl_token,token2022,
+ * token2022_transfer_hook}` (SDK 1.5.13 IDL). All three take `config, pool_authority,
+ * creator, base_mint, quote_mint, pool, …` as their first accounts.
+ */
+const INIT_POOL_DISCRIMINATORS = [
+  [140, 85, 215, 176, 102, 54, 104, 79],
+  [169, 118, 51, 78, 145, 110, 220, 155],
+  [182, 13, 233, 177, 42, 145, 135, 2],
+].map((bytes) => Buffer.from(bytes).toString('hex'));
+const INIT_ACCOUNT = { config: 0, creator: 2, baseMint: 3, pool: 5 } as const;
+
+type AnyInstruction = ParsedInstruction | PartiallyDecodedInstruction;
+
+function decodedData(ix: PartiallyDecodedInstruction): Buffer | null {
+  try {
+    return Buffer.from(bs58.decode(ix.data));
+  } catch (err) {
+    if (err instanceof Error) return null;
+    throw err;
+  }
+}
+
+/** True when the tx (top-level or CPI) runs a DBC pool init for exactly this pool, mint, config and creator. */
+export function initializesPool(
+  tx: ParsedTransactionWithMeta,
+  expected: { pool: PublicKey; mint: PublicKey; config: PublicKey; creator: PublicKey },
+): boolean {
+  const inner = (tx.meta?.innerInstructions ?? []).flatMap((group) => group.instructions);
+  const instructions: AnyInstruction[] = [...tx.transaction.message.instructions, ...inner];
+  return instructions.some((ix) => {
+    if ('parsed' in ix || !ix.programId.equals(DBC_PROGRAM_ID)) return false;
+    const data = decodedData(ix);
+    if (!data || !INIT_POOL_DISCRIMINATORS.includes(data.subarray(0, 8).toString('hex'))) {
+      return false;
+    }
+    const at = (i: number) => ix.accounts[i];
+    return (
+      at(INIT_ACCOUNT.config)?.equals(expected.config) === true &&
+      at(INIT_ACCOUNT.creator)?.equals(expected.creator) === true &&
+      at(INIT_ACCOUNT.baseMint)?.equals(expected.mint) === true &&
+      at(INIT_ACCOUNT.pool)?.equals(expected.pool) === true
+    );
+  });
+}
+
+/**
+ * Accepts a launch only if `signature` is a successful tx, at `confirmed` or stronger,
+ * that initialized the pool derived from `mint` and our config with the owner as creator,
+ * and the pool account agrees (L122, L524). Throws `pool_mismatch` with
+ * `details.reason: LaunchMismatchReason`.
+ */
 export async function verifyLaunch(
   connection: Connection,
-  { signature, mint, expectedConfig, expectedCreator }: VerifyLaunchInput,
+  { signature, mint, expectedConfig, expectedCreator, expectedMetadata }: VerifyLaunchInput,
 ): Promise<{ pool: string }> {
-  const { value } = await connection.getSignatureStatuses([signature], {
-    searchTransactionHistory: true,
-  });
-  const status = value[0];
-  if (!status || status.err !== null) throw mismatch('launch_tx_failed');
-
   const address = deriveDbcPoolAddress(NATIVE_MINT, mint, expectedConfig);
+  const tx = await connection.getParsedTransaction(signature, {
+    commitment: 'confirmed',
+    maxSupportedTransactionVersion: 0,
+  });
+  if (!tx?.meta) throw mismatch('tx_not_found');
+  if (tx.meta.err !== null) throw mismatch('tx_failed');
+  const expected = { pool: address, mint, config: expectedConfig, creator: expectedCreator };
+  if (!initializesPool(tx, expected)) throw mismatch('tx_not_launch');
+
   const pool = await dbc(connection).state.getPool(address);
   if (!pool) throw mismatch('pool_not_found');
   if (!pool.poolState.config.equals(expectedConfig)) throw mismatch('config');
   if (!pool.poolState.creator.equals(expectedCreator)) throw mismatch('creator');
+
+  if (expectedMetadata) {
+    const metadata = await readTokenMetadata(connection, mint);
+    if (!metadata) throw mismatch('metadata_not_found');
+    const { name, symbol, uri } = expectedMetadata;
+    if (name !== undefined && metadata.name !== name) throw mismatch('metadata_name');
+    if (symbol !== undefined && metadata.symbol !== symbol) throw mismatch('metadata_symbol');
+    if (uri !== undefined && metadata.uri !== uri) throw mismatch('metadata_uri');
+  }
   return { pool: address.toBase58() };
+}
+
+export interface CurveVaults {
+  baseMint: PublicKey;
+  baseVault: PublicKey;
+  quoteVault: PublicKey;
+}
+
+export async function readCurveVaults(
+  connection: Connection,
+  pool: PublicKey,
+): Promise<CurveVaults> {
+  const found = await dbc(connection).state.getPool(pool);
+  if (!found) throw new Error(`DBC pool ${pool.toBase58()} not found`);
+  const { baseMint, baseVault, quoteVault } = found.poolState;
+  return { baseMint, baseVault, quoteVault };
 }
 
 export async function quoteBuy(

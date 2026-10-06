@@ -27,6 +27,8 @@ const liquiditySchema = new Schema(
     sliceMicroUsdc: { type: BigInt, required: true, default: 0n },
     solLamports: { type: BigInt, default: null },
     solPriceUsdc: { type: String, default: null },
+    /** When `convert` fixed `solPriceUsdc`; the keeper's SOL price guard orders by it (KPR-04). */
+    pricedAt: { type: Date, default: null },
     buyTxSignature: { type: String, default: null },
     swapTxSignature: { type: String, default: null },
     migrationSignature: { type: String, default: null },

@@ -130,6 +130,16 @@ describe('AppError', () => {
     });
   });
 
+  it('serializes only the catalog message for 5xx codes and keeps the detail for logs (API-15)', () => {
+    const err = new AppError('internal', { message: 'hold 6650aa is expired' });
+    expect(err.message).toBe('hold 6650aa is expired');
+    expect(err.publicMessage).toBe(ERROR_CATALOG.internal.message);
+    expect(err.toEnvelope('req_3').error.message).toBe(ERROR_CATALOG.internal.message);
+    expect(JSON.stringify(err)).not.toContain('6650aa');
+    const upstream = new AppError('upstream_error', { message: 'upstream said 500 at 10.0.0.7' });
+    expect(upstream.toEnvelope().error.message).toBe(ERROR_CATALOG.upstream_error.message);
+  });
+
   it('toEnvelope without a requestId omits it', () => {
     expect(new AppError('internal').toEnvelope()).toEqual({
       error: { code: 'internal', message: ERROR_CATALOG.internal.message },

@@ -102,7 +102,52 @@ export async function tokenSnapshots(
   });
 }
 
-/** `GET /api/tokens/:mint/quote` (L400): curve → DBC quote, graduated → DAMM v2 quote. */
+/** API-05: how long a quote is reused, and how many distinct quotes are kept. */
+export const QUOTE_CACHE_MS = 3_000;
+export const QUOTE_CACHE_MAX = 500;
+
+interface CachedQuote {
+  at: number;
+  quote: Promise<QuoteResponse>;
+}
+
+export type TokenQuoter = (mint: string, query: QuoteQuery) => Promise<QuoteResponse>;
+
+/**
+ * `GET /api/tokens/:mint/quote` (L400): curve → DBC quote, graduated → DAMM v2 quote.
+ * API-05: each quote costs several RPC reads, so identical quotes within
+ * `QUOTE_CACHE_MS` (including ones still in flight) share one chain call. The
+ * cache is bounded: expired entries go first, then the oldest.
+ */
+export function createTokenQuoter(ctx: AppContext): TokenQuoter {
+  const cache = new Map<string, CachedQuote>();
+
+  const evict = (now: number): void => {
+    for (const [key, entry] of cache) {
+      if (now - entry.at >= QUOTE_CACHE_MS || now < entry.at) cache.delete(key);
+    }
+    for (const key of cache.keys()) {
+      if (cache.size < QUOTE_CACHE_MAX) break;
+      cache.delete(key);
+    }
+  };
+
+  return (mint, query) => {
+    const key = `${mint}:${query.side}:${query.amount}`;
+    const now = ctx.clock().getTime();
+    const hit = cache.get(key);
+    if (hit && now >= hit.at && now - hit.at < QUOTE_CACHE_MS) return hit.quote;
+    evict(now);
+    const quote = tokenQuote(ctx, mint, query);
+    cache.set(key, { at: now, quote });
+    // A failed quote is not cached.
+    quote.catch(() => {
+      if (cache.get(key)?.quote === quote) cache.delete(key);
+    });
+    return quote;
+  };
+}
+
 export async function tokenQuote(
   ctx: AppContext,
   mint: string,

@@ -145,8 +145,9 @@ describe('gateway: non-streaming chat completions', () => {
     expect(doc?.createdAt).toBeInstanceOf(Date);
   });
 
-  it('echoes a supplied X-Request-Id and refuses to reuse it', async () => {
+  it('echoes a supplied X-Request-Id as a correlation id only, never a unique key (GW-07)', async () => {
     const c = await consumer();
+    const other = await consumer();
     const first = await chat(c.key, { model: 'gw-ok', messages: hello }).set(
       'X-Request-Id',
       'client-req-1',
@@ -154,12 +155,21 @@ describe('gateway: non-streaming chat completions', () => {
     expect(first.status).toBe(200);
     expect(first.get('X-Request-Id')).toBe('client-req-1');
 
-    const again = await chat(c.key, { model: 'gw-ok', messages: hello }).set(
-      'X-Request-Id',
-      'client-req-1',
-    );
-    expect(again.status).toBe(400);
-    expect(errorOf(again).code).toBe('invalid_request');
+    // The same id again, and from another tenant, is a new, separately billed call.
+    for (const key of [c.key, other.key]) {
+      const again = await chat(key, { model: 'gw-ok', messages: hello }).set(
+        'X-Request-Id',
+        'client-req-1',
+      );
+      expect(again.status).toBe(200);
+      expect(again.get('X-Request-Id')).toBe('client-req-1');
+    }
+    const rows = await Requests.find({ requestId: 'client-req-1' }).lean();
+    expect(rows).toHaveLength(0);
+    const owned = await Requests.find({ userId: new Types.ObjectId(c.userId) }).lean();
+    expect(owned).toHaveLength(2);
+    expect(new Set(owned.map((row) => row.requestId)).size).toBe(2);
+    for (const row of owned) expect(row.requestId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('returns 402 with the shortfall when the balance is below the hold estimate', async () => {

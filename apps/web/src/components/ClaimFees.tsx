@@ -1,17 +1,17 @@
 import type { Model } from '@ibt/shared';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
-import { PublicKey } from '@solana/web3.js';
 import { skipToken, useQuery } from '@tanstack/react-query';
 
 import { useSendTx, type SendTxStatus } from '../hooks/useSendTx';
 import {
   buildClaimTransaction,
   fetchFeeClaimer,
-  resolveClaimRole,
+  resolveClaimRoles,
   type ClaimRole,
 } from '../lib/claims';
 import { shortAddress } from '../lib/format';
 import { queryKeys } from '../lib/queryKeys';
+import { parsePublicKey } from '../lib/solana';
 import { txUrl } from '../lib/solscan';
 import { EXTERNAL_LINK } from './ModelStats';
 
@@ -36,58 +36,66 @@ function claimSources(role: ClaimRole, graduated: boolean): string[] {
   ];
 }
 
-function useClaimRole(model: Model, wallet: string | null): ClaimRole | null {
+const NO_ROLES: ClaimRole[] = [];
+
+function useClaimRoles(model: Model, wallet: string | null): ClaimRole[] {
   const { connection } = useConnection();
-  const dbcPool = model.token.dbcPool;
-  const needsConfig = wallet !== null && wallet !== model.providerWallet && dbcPool !== null;
+  const dbcPool = parsePublicKey(model.token.dbcPool);
+  // Fetched for the provider too: the treasury may also be the config's fee claimer.
   const feeClaimer = useQuery({
-    queryKey: queryKeys.feeClaimer(dbcPool ?? ''),
+    queryKey: queryKeys.feeClaimer(dbcPool?.toBase58() ?? ''),
     queryFn:
-      needsConfig && dbcPool !== null
-        ? () => fetchFeeClaimer(connection, new PublicKey(dbcPool))
-        : skipToken,
+      wallet !== null && dbcPool !== null ? () => fetchFeeClaimer(connection, dbcPool) : skipToken,
     staleTime: Infinity,
   });
-  if (wallet === null) return null;
-  return resolveClaimRole(wallet, model.providerWallet, feeClaimer.data ?? null);
+  if (wallet === null || dbcPool === null) return NO_ROLES;
+  return resolveClaimRoles(wallet, model.providerWallet, feeClaimer.data ?? null);
 }
 
 /**
  * Claims trading fees for the connected wallet: the provider as pool creator,
- * the treasury wallet as the config's fee claimer. Renders nothing otherwise.
+ * the treasury wallet as the config's fee claimer, or both. Renders nothing for
+ * a wallet that holds neither role.
  */
 export function ClaimFees({ model }: { model: Model }) {
   const { publicKey } = useWallet();
   const wallet = publicKey?.toBase58() ?? null;
-  const role = useClaimRole(model, wallet);
+  const roles = useClaimRoles(model, wallet);
+  if (wallet === null || roles.length === 0) return null;
+  return (
+    <div className="space-y-6">
+      {roles.map((role) => (
+        <ClaimPanel key={role} model={model} role={role} wallet={wallet} />
+      ))}
+    </div>
+  );
+}
+
+function ClaimPanel({ model, role, wallet }: { model: Model; role: ClaimRole; wallet: string }) {
   const { send, status, signature, error } = useSendTx();
   const { dbcPool, dammV2Pool } = model.token;
-
-  if (role === null || dbcPool === null) return null;
-
   const graduated = model.token.status === 'graduated' && dammV2Pool !== null;
   const busy = status !== 'idle' && status !== 'confirmed' && status !== 'failed';
+  const headingId = `claim-${model.id}-${role}`;
 
-  function onClaim(claimRole: ClaimRole, pool: string) {
+  function onClaim() {
+    const pool = parsePublicKey(dbcPool);
+    if (pool === null) return;
+    const dammPool = graduated ? parsePublicKey(dammV2Pool) : null;
     void send({
       build: ({ connection, payer }) =>
-        buildClaimTransaction(connection, {
-          role: claimRole,
-          owner: payer,
-          dbcPool: new PublicKey(pool),
-          dammPool: graduated && dammV2Pool !== null ? new PublicKey(dammV2Pool) : null,
-        }),
+        buildClaimTransaction(connection, { role, owner: payer, dbcPool: pool, dammPool }),
       invalidate: [],
     });
   }
 
   return (
     <section
-      aria-labelledby={`claim-${model.id}`}
+      aria-labelledby={headingId}
       className="rounded-sm border border-ink-800 bg-ink-900/60 p-6"
     >
       <div className="flex items-baseline justify-between gap-3">
-        <h2 id={`claim-${model.id}`} className="text-lg font-semibold tracking-tight text-ink-50">
+        <h2 id={headingId} className="text-lg font-semibold tracking-tight text-ink-50">
           Claim fees
         </h2>
         <span className="rounded-sm border border-accent/40 px-2 py-0.5 font-mono text-xs uppercase tracking-label text-accent">
@@ -106,15 +114,10 @@ export function ClaimFees({ model }: { model: Model }) {
         ))}
       </ul>
       <p className="mt-4 text-xs text-ink-400">
-        Fees accrue in SOL and are paid to {shortAddress(wallet ?? '')}. Claiming with nothing
-        accrued only costs the network fee.
+        Fees accrue in SOL and are paid to {shortAddress(wallet)}. Claiming with nothing accrued
+        only costs the network fee.
       </p>
-      <button
-        type="button"
-        className={`${PRIMARY_BUTTON} mt-5`}
-        disabled={busy}
-        onClick={() => onClaim(role, dbcPool)}
-      >
+      <button type="button" className={`${PRIMARY_BUTTON} mt-5`} disabled={busy} onClick={onClaim}>
         {busy ? 'Claiming…' : 'Claim fees'}
       </button>
       <p aria-live="polite" className="mt-3 min-h-5 font-mono text-xs text-ink-400">
@@ -140,11 +143,4 @@ export function ClaimFees({ model }: { model: Model }) {
       )}
     </section>
   );
-}
-
-/** Token page variant (spec L480): only the model's provider sees it. */
-export function OwnerClaimFees({ model }: { model: Model }) {
-  const { publicKey } = useWallet();
-  if (publicKey?.toBase58() !== model.providerWallet) return null;
-  return <ClaimFees model={model} />;
 }

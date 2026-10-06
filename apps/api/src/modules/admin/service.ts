@@ -52,11 +52,21 @@ export async function pauseModel(ctx: AppContext, id: string): Promise<PauseResu
   if (row.status === 'delisted') {
     throw new AppError('invalid_request', { message: 'delisted models cannot be paused' });
   }
-  const updated = await Models.updateOne(
-    { _id: row._id, status: 'active' },
-    { $set: { status: 'paused' } },
-  );
-  const changed = updated.modifiedCount === 1;
+  // An owner (or health) pause is taken over too, so the owner cannot lift it (API-02);
+  // never a delisted model (API-03).
+  const before = await Models.findOneAndUpdate(
+    { _id: row._id, status: { $in: ['active', 'paused'] }, pausedBy: { $ne: 'admin' } },
+    { $set: { status: 'paused', pausedBy: 'admin' } },
+  )
+    .select({ status: 1 })
+    .lean();
+  if (!before) {
+    const current = await Models.findById(row._id).select({ status: 1 }).lean();
+    if (current?.status === 'delisted') {
+      throw new AppError('invalid_request', { message: 'delisted models cannot be paused' });
+    }
+  }
+  const changed = before?.status === 'active';
   if (changed) {
     ctx.logger.info({ modelId: id }, 'admin: model paused');
     ctx.alerts.modelPaused({ modelId: id, slug: row.slug, reason: 'admin' });

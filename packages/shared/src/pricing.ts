@@ -50,11 +50,15 @@ export function assertBps(bps: number, name = 'bps'): void {
   }
 }
 
-/** G16: `floor(cost·(10000−bps)/10000)`. */
+/**
+ * G16: `floor(cost·(10000−bps)/10000)`, but at least 1 micro while the discount
+ * is partial: rounding must never make a billable call free (`floor(1·0.9) = 0`).
+ */
 export function applyDiscount(costMicro: bigint, discountBps: number): bigint {
   assertBps(discountBps, 'discountBps');
   const cost = toNonNegativeBigInt(costMicro, 'costMicro');
-  return (cost * BigInt(BPS_DENOMINATOR - discountBps)) / BigInt(BPS_DENOMINATOR);
+  const discounted = (cost * BigInt(BPS_DENOMINATOR - discountBps)) / BigInt(BPS_DENOMINATOR);
+  return discounted === 0n && cost > 0n && discountBps < BPS_DENOMINATOR ? 1n : discounted;
 }
 
 export function holderDiscountBps(balanceBaseUnits: IntLike): number {

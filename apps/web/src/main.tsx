@@ -5,7 +5,7 @@ import { RouterProvider } from 'react-router-dom';
 import { sdkNames } from './lib/sdkSmoke';
 import { QueryProvider } from './providers/QueryProvider';
 import { WalletProviders } from './providers/WalletProviders';
-import { createAppRouter, routerProviderFuture } from './router';
+import { createAppRouter } from './router';
 
 import './index.css';
 
@@ -23,7 +23,7 @@ createRoot(rootEl).render(
   <StrictMode>
     <QueryProvider>
       <WalletProviders>
-        <RouterProvider router={router} future={routerProviderFuture} />
+        <RouterProvider router={router} />
       </WalletProviders>
     </QueryProvider>
   </StrictMode>,

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -18,6 +19,8 @@ export const MOCK_MODES = [
 export type MockMode = (typeof MOCK_MODES)[number];
 
 export const DEFAULT_MOCK_API_KEY = 'mock-key';
+export const DEFAULT_MAX_CALLS = 1000;
+const CREDENTIAL_HEADERS = ['authorization', 'proxy-authorization', 'x-api-key', 'cookie'];
 
 export interface MockUpstreamOptions {
   /** Port to bind; `0` (default) picks a free port. */
@@ -32,6 +35,8 @@ export interface MockUpstreamOptions {
   firstByteDelayMs?: number;
   /** Delay between SSE chunks in `slow-stream` mode (default 500 ms). */
   chunkDelayMs?: number;
+  /** How many of the latest requests `calls` keeps (default 1000); older ones are dropped. */
+  maxCalls?: number;
 }
 
 export interface MockCall {
@@ -45,8 +50,31 @@ export interface MockUpstream {
   url: string;
   port: number;
   server: Server;
+  /** The latest `maxCalls` requests, oldest first, with credential headers redacted. */
   calls: MockCall[];
   close: () => Promise<void>;
+}
+
+/**
+ * Stored instead of a credential: a SHA-256 prefix, so equal secrets still compare equal.
+ * The public dev key `mock-key` is kept as sent, so tests can see which key was forwarded.
+ */
+function redactCredential(value: string): string {
+  const match = /^(Bearer\s+)(.*)$/i.exec(value);
+  const secret = match?.[2] ?? value;
+  if (secret === DEFAULT_MOCK_API_KEY) return value;
+  const digest = createHash('sha256').update(secret).digest('hex').slice(0, 12);
+  return `${match?.[1] ?? ''}[redacted sha256:${digest}]`;
+}
+
+function redactHeaders(headers: MockCall['headers']): MockCall['headers'] {
+  const copy = { ...headers };
+  for (const name of CREDENTIAL_HEADERS) {
+    const value = copy[name];
+    if (typeof value === 'string') copy[name] = redactCredential(value);
+    else if (Array.isArray(value)) copy[name] = value.map(redactCredential);
+  }
+  return copy;
 }
 
 interface ChatMessage {
@@ -127,6 +155,7 @@ export async function createMockUpstream(options: MockUpstreamOptions = {}): Pro
     mode: serverMode = 'ok',
     firstByteDelayMs = 2000,
     chunkDelayMs = 500,
+    maxCalls = DEFAULT_MAX_CALLS,
   } = options;
   const apiKey = options.apiKey === undefined ? DEFAULT_MOCK_API_KEY : options.apiKey;
   const calls: MockCall[] = [];
@@ -142,7 +171,13 @@ export async function createMockUpstream(options: MockUpstreamOptions = {}): Pro
   app.use(express.json({ limit: '1mb' }));
 
   app.use((req, _res, next) => {
-    calls.push({ method: req.method, path: req.path, headers: { ...req.headers }, body: req.body });
+    calls.push({
+      method: req.method,
+      path: req.path,
+      headers: redactHeaders(req.headers),
+      body: req.body,
+    });
+    if (calls.length > maxCalls) calls.splice(0, calls.length - maxCalls);
     next();
   });
 

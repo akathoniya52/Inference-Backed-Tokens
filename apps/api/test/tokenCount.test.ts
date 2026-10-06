@@ -1,5 +1,6 @@
 import {
   ChatCompletionRequestSchema,
+  FILE_PART_HOLD_TOKENS,
   IMAGE_PART_HOLD_TOKENS,
   MAX_PROMPT_STRING_CHARS,
   type ChatCompletionRequest,
@@ -74,6 +75,46 @@ describe('tokenCount', () => {
       count('assistant') +
       3;
     expect(n).toBe(expected);
+  });
+
+  it('scales the file and audio surcharge with the inline payload (GW-02)', async () => {
+    const { countMessages, MEDIA_CHARS_PER_TOKEN } = await freshModule();
+    const file = (data: string) => ({
+      type: 'file',
+      file: { filename: 'doc.pdf', file_data: `data:application/pdf;base64,${data}` },
+    });
+    const small = countMessages([{ role: 'user', content: [file('AAAA')] }]);
+    const big = countMessages([{ role: 'user', content: [file('A'.repeat(600_000))] }]);
+    // The flat minimum for a small file, about one token per 4 payload chars for a large one.
+    expect(small).toBeGreaterThanOrEqual(FILE_PART_HOLD_TOKENS);
+    expect(big).toBeGreaterThanOrEqual(600_000 / MEDIA_CHARS_PER_TOKEN);
+    const image = countMessages([
+      { role: 'user', content: [{ type: 'image_url', image_url: { url: 'A'.repeat(600_000) } }] },
+    ]);
+    expect(image).toBeLessThan(IMAGE_PART_HOLD_TOKENS + 20);
+  });
+
+  it(`rejects more media parts than the cap (GW-02)`, async () => {
+    const { assertPromptSize, MAX_MEDIA_PARTS } = await freshModule();
+    const withImages = (n: number) =>
+      ChatCompletionRequestSchema.parse({
+        model: 'm',
+        messages: [
+          {
+            role: 'user',
+            content: Array.from({ length: n }, () => ({
+              type: 'image_url',
+              image_url: { url: 'https://example.com/a.png' },
+            })),
+          },
+        ],
+      });
+    expect(() => {
+      assertPromptSize(withImages(MAX_MEDIA_PARTS));
+    }).not.toThrow();
+    expect(() => {
+      assertPromptSize(withImages(MAX_MEDIA_PARTS + 1));
+    }).toThrow(/at most/);
   });
 
   it('counts unknown parts, tool calls and tool definitions (A4)', async () => {

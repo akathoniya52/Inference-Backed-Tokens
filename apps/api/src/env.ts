@@ -14,11 +14,15 @@ function mongoHost(uri: string): string | null {
   }
 }
 
-/** `TRUST_PROXY` as Express expects it: hop count, boolean, or an address/subnet list. */
+/**
+ * `TRUST_PROXY` as Express expects it: hop count, boolean, or an address/subnet
+ * list. Unset means `1` outside production; production must set it (API-01).
+ */
 const TrustProxySchema = z
   .string()
-  .default('1')
-  .transform((value): number | boolean | string => {
+  .optional()
+  .transform((value): number | boolean | string | undefined => {
+    if (value === undefined) return undefined;
     if (/^\d+$/.test(value)) return Number(value);
     if (value === 'true') return true;
     if (value === 'false') return false;
@@ -53,7 +57,17 @@ const fields = z.object({
   MASTER_KEY: z.string().regex(MASTER_KEY_FORMAT, 'must be 32 bytes as hex or base64'),
   ADMIN_TOKEN: z.string().min(32),
 
+  NODE_ENV: z.string().optional(),
   PORT: z.coerce.number().int().min(0).max(65_535).default(4000),
+  /**
+   * Public origin of this api as the web app's `VITE_API_URL`; a launched token's
+   * on-chain metadata URI must be `<API_PUBLIC_URL>/metadata/<mint>.json` (API-06).
+   * Required on mainnet.
+   */
+  API_PUBLIC_URL: z
+    .url({ protocol: /^https?$/ })
+    .transform((url) => url.replace(/\/+$/, ''))
+    .optional(),
   // cors matches Origin exactly, so drop any trailing slash or path.
   WEB_ORIGIN: z.url().transform((url) => new URL(url).origin),
   TRUST_PROXY: TrustProxySchema,
@@ -98,6 +112,27 @@ export const envSchema = z
     fields,
   )
   .superRefine((env, ctx) => {
+    const mainnet = env.CLUSTER === 'mainnet-beta';
+    if (mainnet || env.NODE_ENV === 'production') {
+      // A default hop count lets anyone who reaches the port directly choose `req.ip`.
+      if (env.TRUST_PROXY === undefined || env.TRUST_PROXY === true) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['TRUST_PROXY'],
+          message: 'must be set to a hop count, a proxy subnet list or false in production',
+        });
+      }
+    }
+    if (mainnet && env.ADMIN_IP_ALLOWLIST.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['ADMIN_IP_ALLOWLIST'],
+        message: 'must list the admin addresses on mainnet',
+      });
+    }
+    if (mainnet && env.API_PUBLIC_URL === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['API_PUBLIC_URL'], message: 'required on mainnet' });
+    }
     if (env.ALLOW_PRIVATE_UPSTREAMS && env.CLUSTER === 'mainnet-beta') {
       ctx.addIssue({
         code: 'custom',
@@ -118,9 +153,22 @@ export const envSchema = z
       });
     }
   })
-  .transform(({ KEEPER_SECRET_KEY: _keeper, TREASURY_SECRET_KEY: _treasury, ...env }) => env);
+  .transform(
+    ({ KEEPER_SECRET_KEY: _keeper, TREASURY_SECRET_KEY: _treasury, TRUST_PROXY, ...env }) => ({
+      ...env,
+      TRUST_PROXY: TRUST_PROXY ?? 1,
+    }),
+  );
 
 export type ApiEnv = z.output<typeof envSchema>;
+
+/**
+ * GW-08 startup warning: in production without `trust proxy`, every client
+ * behind a load balancer shares its IP, and so its per-IP limits.
+ */
+export function clientsShareProxyIp(env: Pick<ApiEnv, 'NODE_ENV' | 'TRUST_PROXY'>): boolean {
+  return env.NODE_ENV === 'production' && env.TRUST_PROXY === false;
+}
 
 /** Parses the api env; errors name the offending keys but never echo values. */
 export function loadEnv(source: Record<string, string | undefined> = process.env): ApiEnv {

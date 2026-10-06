@@ -17,11 +17,23 @@ export type HealthCheckModel = Pick<ModelFields, 'slug' | 'upstream' | 'status'>
 
 /** Latency samples per model for `p50LatencyMs`; process-local, newest last. */
 const LATENCY_WINDOW = 21;
+/** API-16: models tracked at once; the least recently checked one is evicted first. */
+export const LATENCY_MAX_MODELS = 1_000;
 const latencySamples = new Map<string, number[]>();
 
-function recordLatency(modelId: string, latencyMs: number): number {
+export function trackedLatencyModels(): number {
+  return latencySamples.size;
+}
+
+export function recordLatency(modelId: string, latencyMs: number): number {
   const samples = [...(latencySamples.get(modelId) ?? []), latencyMs].slice(-LATENCY_WINDOW);
+  // Re-inserting moves the model to the end of the Map's insertion order.
+  latencySamples.delete(modelId);
   latencySamples.set(modelId, samples);
+  for (const oldest of latencySamples.keys()) {
+    if (latencySamples.size <= LATENCY_MAX_MODELS) break;
+    latencySamples.delete(oldest);
+  }
   const sorted = [...samples].sort((a, b) => a - b);
   return sorted[Math.floor((sorted.length - 1) / 2)] ?? latencyMs;
 }
@@ -113,7 +125,7 @@ export async function runHealthCheck(
     // Conditional on `active`, so concurrent checks pause and alert once.
     const paused = await Models.updateOne(
       { _id: model._id, status: 'active' },
-      { $set: { status: 'paused' } },
+      { $set: { status: 'paused', pausedBy: 'health' } },
     );
     if (paused.modifiedCount === 1) {
       status = 'paused';

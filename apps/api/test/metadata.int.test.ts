@@ -79,6 +79,28 @@ describe('GET /metadata/:mint.json', () => {
     expect(body.image).toBe('');
   });
 
+  it('is readable from any origin without credentials; other routes keep WEB_ORIGIN (API-04)', async () => {
+    const modelId = await createModel('cors-meta', 'https://img.example/cors.png');
+    const mint = await prepare(modelId, 'CORS');
+    const origin = 'https://wallet.example';
+
+    const res = await request(t.app).get(`/metadata/${mint}.json`).set('Origin', origin);
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe('*');
+    expect(res.headers['access-control-allow-credentials']).toBeUndefined();
+    expect(res.headers['cross-origin-resource-policy']).toBe('cross-origin');
+
+    const preflight = await request(t.app)
+      .options(`/metadata/${mint}.json`)
+      .set('Origin', origin)
+      .set('Access-Control-Request-Method', 'GET');
+    expect(preflight.headers['access-control-allow-methods']).toBe('GET,HEAD');
+
+    const api = await request(t.app).get('/api/models').set('Origin', origin);
+    expect(api.headers['access-control-allow-origin']).not.toBe('*');
+    expect(api.headers['access-control-allow-origin']).not.toBe(origin);
+  });
+
   it('an unknown or malformed mint returns 404', async () => {
     const unknown = await request(t.app).get(`/metadata/${base58Encode(randomBytes(32))}.json`);
     expect(unknown.status).toBe(404);

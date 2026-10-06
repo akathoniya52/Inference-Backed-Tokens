@@ -1,8 +1,8 @@
 import {
-  Requests,
   Types,
   capture,
   hold,
+  isHoldUnbilled,
   release,
   type DailyCapOptions,
   type RequestRecord,
@@ -19,7 +19,7 @@ import {
   type ChatCompletionResponse,
 } from '@ibt/shared';
 import { decrypt } from '@ibt/shared/node';
-import { request } from 'undici';
+import { request, type Dispatcher } from 'undici';
 
 import type { AppContext } from '../../app.js';
 import type { ApiKeyContext } from '../../context.js';
@@ -86,6 +86,26 @@ export function upstreamHeaders(ctx: AppContext, model: ResolvedModel): Record<s
   };
 }
 
+/** GW-04: a non-streamed upstream body larger than this is an upstream error. */
+export const MAX_UPSTREAM_BODY_BYTES = 8 * 1024 * 1024;
+
+/** The body as text, or null (and the socket dropped) once it passes `max` bytes. */
+async function readCapped(
+  body: Dispatcher.ResponseData['body'],
+  max: number,
+): Promise<string | null> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of body) {
+    const bytes = chunk as Buffer;
+    size += bytes.length;
+    // Leaving the loop destroys the body, so the rest is never read.
+    if (size > max) return null;
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 function parseCompletion(text: string): ChatCompletionResponse | null {
   let json: unknown;
   try {
@@ -124,7 +144,13 @@ async function callUpstream(ctx: AppContext, input: CompletionInput): Promise<Up
       await res.body.dump();
       return { ok: false, status: 'upstream_error', upstreamStatus };
     }
-    const rawBody = await res.body.text();
+    const declared = Number(res.headers['content-length']);
+    if (Number.isFinite(declared) && declared > MAX_UPSTREAM_BODY_BYTES) {
+      res.body.destroy();
+      return { ok: false, status: 'upstream_error', upstreamStatus };
+    }
+    const rawBody = await readCapped(res.body, MAX_UPSTREAM_BODY_BYTES);
+    if (rawBody === null) return { ok: false, status: 'upstream_error', upstreamStatus };
     const parsed = parseCompletion(rawBody);
     if (!parsed) return { ok: false, status: 'upstream_error', upstreamStatus };
     return { ok: true, rawBody, parsed, upstreamStatus };
@@ -142,14 +168,24 @@ async function callUpstream(ctx: AppContext, input: CompletionInput): Promise<Up
   }
 }
 
+function isEmptyField(value: unknown): boolean {
+  if (value === null || value === undefined || value === '') return true;
+  if (Array.isArray(value)) return value.length === 0;
+  return typeof value === 'object' && Object.keys(value).length === 0;
+}
+
+/**
+ * GW-01: every non-empty message field but `role` is output the provider was
+ * paid to generate (content, reasoning, refusal, tool and function calls, …).
+ */
 function completionText(response: ChatCompletionResponse): string {
   return response.choices
-    .map((choice) => {
-      const { content } = choice.message;
-      const text = typeof content === 'string' ? content : '';
-      const toolCalls = 'tool_calls' in choice.message ? choice.message.tool_calls : undefined;
-      return toolCalls === undefined ? text : text + JSON.stringify(toolCalls);
-    })
+    .map((choice) =>
+      Object.entries(choice.message)
+        .filter(([field, value]) => field !== 'role' && !isEmptyField(value))
+        .map(([, value]) => (typeof value === 'string' ? value : JSON.stringify(value)))
+        .join(''),
+    )
     .join('');
 }
 
@@ -200,11 +236,7 @@ export interface OpenHold {
 /** Gateway steps 3–4 (L236–237): reuse and daily-cap checks, then hold the worst case. */
 export async function openHold(ctx: AppContext, input: CompletionInput): Promise<OpenHold> {
   const { requestId, key, model, body } = input;
-  // Fast path only: the hold's unique `requestId` is the atomic claim (A2).
-  if (await Requests.exists({ requestId })) {
-    throw new AppError('invalid_request', { message: 'X-Request-Id was already used' });
-  }
-
+  // `requestId` is server-generated (GW-07); the hold's unique index still guards it (A2).
   const pricing = {
     inPrice: model.pricing.inputPerMTokMicroUsdc,
     outPrice: model.pricing.outputPerMTokMicroUsdc,
@@ -266,28 +298,49 @@ export async function completeChat(
   try {
     return await forwardAndBill(ctx, input, held);
   } catch (err) {
-    await releaseAbandoned(ctx, input.requestId, held);
-    throw err;
+    const billed = await releaseAbandoned(ctx, input.requestId, held);
+    throw billed ? new BilledCallError(err) : err;
+  }
+}
+
+/**
+ * GW-05: an error that escaped a call which was (or may have been) billed. The
+ * router keeps the idempotency key locked, so a retry is never billed again,
+ * and answers with `original`.
+ */
+export class BilledCallError extends Error {
+  override readonly name = 'BilledCallError';
+
+  constructor(readonly original: unknown) {
+    super('a billed gateway call failed');
   }
 }
 
 /**
  * Last resort when an error escapes the gateway: releases a hold that neither
- * a capture nor a release closed. A no-op once the hold is closed.
+ * a capture nor a release closed. A no-op once the hold is closed. Returns
+ * false only when the call is known unbilled (its hold released or expired).
  */
 export async function releaseAbandoned(
   ctx: AppContext,
   requestId: string,
   held: OpenHold,
-): Promise<void> {
+): Promise<boolean> {
   try {
     const { released } = await release(held.holdId);
-    if (released) ctx.logger.warn({ requestId }, 'released a hold abandoned by an error');
+    if (released) {
+      ctx.logger.warn({ requestId }, 'released a hold abandoned by an error');
+      return false;
+    }
+    // Captured, or open with a capture due (GW-12).
+    return !(await isHoldUnbilled(held.holdId));
   } catch (err) {
     ctx.logger.error(
       { requestId, errName: err instanceof Error ? err.name : 'unknown' },
       'could not release an abandoned hold; hold expiry will',
     );
+    // Unknown, so treated as billed: a locked key never charges twice.
+    return true;
   }
 }
 

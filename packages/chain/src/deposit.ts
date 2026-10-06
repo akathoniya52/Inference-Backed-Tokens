@@ -28,7 +28,8 @@ export type DepositRejection =
   | 'memo_mismatch'
   | 'wrong_destination'
   | 'wrong_mint'
-  | 'zero_amount';
+  | 'zero_amount'
+  | 'unsigned_transfer';
 
 export type DepositResult =
   | {
@@ -45,6 +46,8 @@ export type DepositResult =
 interface TokenTransfer {
   destination: string;
   authority: string;
+  /** Multisig co-signers; empty for a single-key authority. */
+  multisigSigners: string[];
   amount: bigint;
   /** Present for `transferChecked`; plain `transfer` resolves it from `postTokenBalances`. */
   mint: string | null;
@@ -74,19 +77,43 @@ function tokenTransferOf(ix: AnyInstruction): TokenTransfer | null {
   if (!isRecord(parsed) || !isRecord(parsed.info)) return null;
   const { info } = parsed;
   const destination = str(info.destination);
-  const authority = str(info.authority) ?? str(info.multisigAuthority);
+  const multisig = str(info.multisigAuthority);
+  const authority = str(info.authority) ?? multisig;
   if (!destination || !authority) return null;
+  const multisigSigners =
+    multisig && Array.isArray(info.signers)
+      ? info.signers.map(str).filter((k): k is string => k !== null)
+      : [];
+  const base = { destination, authority, multisigSigners };
 
   if (parsed.type === 'transfer') {
     const amount = amountOf(info.amount);
-    return amount === null ? null : { destination, authority, amount, mint: null };
+    return amount === null ? null : { ...base, amount, mint: null };
   }
   if (parsed.type === 'transferChecked' && isRecord(info.tokenAmount)) {
     const amount = amountOf(info.tokenAmount.amount);
     const mint = str(info.mint);
-    return amount === null || !mint ? null : { destination, authority, amount, mint };
+    return amount === null || !mint ? null : { ...base, amount, mint };
   }
   return null;
+}
+
+function txSigners(tx: ParsedTransactionWithMeta): Set<string> {
+  return new Set(
+    tx.transaction.message.accountKeys.filter((k) => k.signer).map((k) => k.pubkey.toBase58()),
+  );
+}
+
+/**
+ * A program can move tokens it controls (PDA authority, `invoke_signed`) into the treasury
+ * inside someone else's tx; only a transfer whose owner/delegate (or every multisig
+ * co-signer) signed this tx is the depositor's money (CHN-08).
+ */
+function signedByTx(transfer: TokenTransfer, signers: Set<string>): boolean {
+  if (transfer.multisigSigners.length > 0) {
+    return transfer.multisigSigners.every((k) => signers.has(k));
+  }
+  return signers.has(transfer.authority);
 }
 
 function postBalanceMint(tx: ParsedTransactionWithMeta, account: string): string | null {
@@ -100,7 +127,9 @@ function postBalanceMint(tx: ParsedTransactionWithMeta, account: string): string
  * Verifies a USDC deposit (Plan.md L519) from a `jsonParsed` transaction fetched
  * at `finalized`. Counts SPL Token `transfer`/`transferChecked` instructions,
  * top-level or inner, whose destination is the treasury ATA; the amount always
- * comes from those instructions, never from the client.
+ * comes from those instructions, never from the client. Every counted transfer
+ * must be authorised by a signer of the tx, else the whole deposit is rejected
+ * (`unsigned_transfer`).
  */
 export function parseDeposit(
   tx: ParsedTransactionWithMeta | null,
@@ -121,6 +150,10 @@ export function parseDeposit(
     .filter((t): t is TokenTransfer => t !== null && t.destination === treasury);
   const [first] = transfers;
   if (!first) return { ok: false, reason: 'wrong_destination' };
+  const signers = txSigners(tx);
+  if (!transfers.every((t) => signedByTx(t, signers))) {
+    return { ok: false, reason: 'unsigned_transfer' };
+  }
 
   const usdc = expected.usdcMint.toBase58();
   const allUsdc = transfers.every((t) => (t.mint ?? postBalanceMint(tx, t.destination)) === usdc);

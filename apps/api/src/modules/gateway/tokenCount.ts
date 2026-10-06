@@ -50,21 +50,42 @@ export function count(text: string): number {
   return total;
 }
 
-function mediaPartTokens(type: string): number | undefined {
+type MediaKind = 'image' | 'audio' | 'file';
+
+function mediaKind(type: string): MediaKind | undefined {
   switch (type) {
     case 'image_url':
     case 'image':
     case 'input_image':
-      return IMAGE_PART_HOLD_TOKENS;
+      return 'image';
     case 'input_audio':
     case 'audio':
-      return AUDIO_PART_HOLD_TOKENS;
+      return 'audio';
     case 'file':
     case 'input_file':
-      return FILE_PART_HOLD_TOKENS;
+      return 'file';
     default:
       return undefined;
   }
+}
+
+/** GW-02: media parts per request; each one may cost the upstream many tokens. */
+export const MAX_MEDIA_PARTS = 16;
+/** Inline payload characters (base64 or URL) per held token for audio and files. */
+export const MEDIA_CHARS_PER_TOKEN = 4;
+
+/**
+ * Hold tokens for a media part. GW-02: audio and files (a PDF in `file_data`, say)
+ * cost the upstream in proportion to their size, so their surcharge grows with
+ * the inline payload, never below the flat minimum. Images keep the flat
+ * surcharge: providers resize them, which bounds their tokens whatever the bytes.
+ */
+function mediaPartTokens(part: { type: string }): number | undefined {
+  const kind = mediaKind(part.type);
+  if (kind === undefined) return undefined;
+  if (kind === 'image') return IMAGE_PART_HOLD_TOKENS;
+  const flat = kind === 'audio' ? AUDIO_PART_HOLD_TOKENS : FILE_PART_HOLD_TOKENS;
+  return Math.max(flat, Math.ceil(JSON.stringify(part).length / MEDIA_CHARS_PER_TOKEN));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -82,7 +103,7 @@ function countContent(content: ChatMessage['content']): number {
     }
     // Any other part reaches the upstream too: a flat surcharge for media,
     // the serialized part for everything else.
-    total += mediaPartTokens(part.type) ?? count(JSON.stringify(part));
+    total += mediaPartTokens(part) ?? count(JSON.stringify(part));
   }
   return total;
 }
@@ -138,7 +159,7 @@ function countedValues(body: ChatCompletionRequest): unknown[] {
     }
     for (const part of content) {
       if (part.type === 'text' && typeof part.text === 'string') values.push(part.text);
-      else if (mediaPartTokens(part.type) === undefined) values.push(part);
+      else if (mediaKind(part.type) === undefined) values.push(part);
     }
   }
   for (const field of PROMPT_FIELDS) values.push(body[field]);
@@ -148,9 +169,20 @@ function countedValues(body: ChatCompletionRequest): unknown[] {
 /**
  * A5: rejects a prompt too large to count before tiktoken sees it: every
  * counted string at most `MAX_PROMPT_STRING_CHARS`, all of them together
- * `MAX_PROMPT_CHARS`.
+ * `MAX_PROMPT_CHARS`, and at most `MAX_MEDIA_PARTS` media parts (GW-02).
  */
 export function assertPromptSize(body: ChatCompletionRequest): void {
+  const mediaParts = body.messages.reduce(
+    (sum, message) =>
+      sum +
+      (Array.isArray(message.content)
+        ? message.content.filter((part) => mediaKind(part.type) !== undefined).length
+        : 0),
+    0,
+  );
+  if (mediaParts > MAX_MEDIA_PARTS) {
+    throw tooLarge(`a request may carry at most ${MAX_MEDIA_PARTS} image, audio or file parts`);
+  }
   let total = 0;
   const stack = countedValues(body).map((value) => ({ value, depth: 0 }));
   for (let item = stack.pop(); item !== undefined; item = stack.pop()) {

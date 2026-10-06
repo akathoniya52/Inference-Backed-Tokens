@@ -1,7 +1,8 @@
 # Local infra only. The API and keeper run on the host via `pnpm dev`.
 services:
   mongo:
-    image: mongo:7
+    # Same version as mongodb-memory-server in the tests (MONGOMS_VERSION / MONGO_TEST_VERSION).
+    image: mongo:7.0.14
     command: ['mongod', '--replSet', 'rs0', '--bind_ip_all']
     ports:
       # No auth, so publish on the host's loopback only. --bind_ip_all stays:

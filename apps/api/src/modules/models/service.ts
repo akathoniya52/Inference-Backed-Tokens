@@ -158,6 +158,23 @@ export async function createModel(
   return toOwnerDto(created, await walletOf(created));
 }
 
+/**
+ * API-02: the owner lifts only their own pause. An admin pause stays until an
+ * admin lifts it; a health (or unattributed, pre-`pausedBy`) pause only once a
+ * health check has passed since, which resets `consecutiveFailures`.
+ */
+function assertOwnerMayResume(row: ModelRow): void {
+  if (row.pausedBy === 'owner') return;
+  if (row.pausedBy === 'admin') {
+    throw new AppError('forbidden', { message: 'an admin paused this model' });
+  }
+  if (row.health.consecutiveFailures > 0) {
+    throw new AppError('forbidden', {
+      message: 'the model was paused by failed health checks; run a passing health check first',
+    });
+  }
+}
+
 function buildPatch(ctx: AppContext, row: ModelRow, patch: UpdateModelRequest) {
   const set: Record<string, unknown> = {};
   if (patch.name !== undefined) set.name = patch.name;
@@ -193,9 +210,17 @@ function buildPatch(ctx: AppContext, row: ModelRow, patch: UpdateModelRequest) {
     if (row.status === 'delisted') {
       throw new AppError('forbidden', { message: 'delisted models cannot be resumed' });
     }
-    set.status = patch.status;
-    // Resuming clears the health-check strike count (L483).
-    if (patch.status === 'active') set['health.consecutiveFailures'] = 0;
+    if (patch.status === 'paused' && row.status === 'active') {
+      set.status = 'paused';
+      set.pausedBy = 'owner';
+    }
+    if (patch.status === 'active' && row.status === 'paused') {
+      assertOwnerMayResume(row);
+      set.status = 'active';
+      set.pausedBy = null;
+      // Resuming clears the health-check strike count (L483).
+      set['health.consecutiveFailures'] = 0;
+    }
   }
   return set;
 }
@@ -210,12 +235,30 @@ export async function updateModel(
   if (!row) throw new AppError('model_not_found');
   if (!row.providerId.equals(userId)) throw new AppError('forbidden');
 
+  const set = buildPatch(ctx, row, patch);
+  // API-03: never write over a delist. A status change also requires the status and
+  // pauser it was decided on, so a concurrent admin or health pause is never undone.
+  const statusGuard =
+    'status' in set
+      ? {
+          status: row.status,
+          pausedBy: row.pausedBy ?? null,
+          'health.consecutiveFailures': row.health.consecutiveFailures,
+        }
+      : {};
   const updated = await Models.findOneAndUpdate(
-    { _id: row._id, providerId: row.providerId },
-    { $set: buildPatch(ctx, row, patch) },
+    { _id: row._id, providerId: row.providerId, status: { $ne: 'delisted' }, ...statusGuard },
+    { $set: set },
     { new: true },
   ).lean<ModelRow>();
-  if (!updated) throw new AppError('model_not_found');
+  if (!updated) {
+    const current = await Models.findById(row._id).select({ status: 1 }).lean();
+    if (!current) throw new AppError('model_not_found');
+    if (current.status === 'delisted') {
+      throw new AppError('forbidden', { message: 'the model was delisted' });
+    }
+    throw new AppError('invalid_request', { message: 'model status changed meanwhile; retry' });
+  }
   if (row.status === 'active' && updated.status === 'paused') {
     ctx.alerts.modelPaused({ modelId: id, slug: updated.slug, reason: 'owner' });
   }

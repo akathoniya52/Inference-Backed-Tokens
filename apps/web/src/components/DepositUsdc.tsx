@@ -1,18 +1,21 @@
 import {
   DepositResponseSchema,
   ErrorEnvelopeSchema,
-  UsdcInputSchema,
+  USDC_DECIMALS,
   usdcStringToMicro,
   type DepositRequest,
   type DepositResponse,
 } from '@ibt/shared';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { useState, type FormEvent } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
+import { accountKeys } from '../hooks/useAccount';
 import { useSendTx } from '../hooks/useSendTx';
+import { parseAmountInput } from '../lib/amount';
 import { apiFetch, isApiError } from '../lib/api';
 import { formatUsdc } from '../lib/format';
-import { buildDepositTransaction } from '../lib/solana';
+import { buildDepositTransaction, resolveTreasuryUsdcAta } from '../lib/solana';
 
 export const DEPOSIT_POLL_INTERVAL_MS = 5_000;
 export const DEPOSIT_POLL_ATTEMPTS = 24;
@@ -29,24 +32,38 @@ function isPendingBody(body: unknown): boolean {
   return Object.values(body).includes('deposit_pending');
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      const reason: unknown = signal.reason;
+      reject(reason instanceof Error ? reason : new DOMException('Polling stopped.', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
  * Posts the signature until the api has seen it finalized. A 202
  * `deposit_pending` is retried every 5 s for ~2 min (P3-T7); anything else
- * that is not a credit is thrown.
+ * that is not a credit is thrown. `signal` stops it (and the request in
+ * flight) when the component unmounts.
  */
-async function pollDeposit(txSignature: string): Promise<DepositResult> {
+async function pollDeposit(txSignature: string, signal: AbortSignal): Promise<DepositResult> {
   const body: DepositRequest = { txSignature };
   for (let attempt = 0; attempt < DEPOSIT_POLL_ATTEMPTS; attempt += 1) {
-    if (attempt > 0) await sleep(DEPOSIT_POLL_INTERVAL_MS);
+    signal.throwIfAborted();
+    if (attempt > 0) await sleep(DEPOSIT_POLL_INTERVAL_MS, signal);
     let response: unknown;
     try {
       response = await apiFetch('/api/billing/deposits', {
         method: 'POST',
         body: JSON.stringify(body),
+        signal,
       });
     } catch (error) {
       if (isApiError(error) && error.code === 'deposit_already_credited') {
@@ -86,8 +103,28 @@ export function DepositUsdc({ depositRef }: DepositUsdcProps) {
   const [signature, setSignature] = useState<string | null>(null);
   const [credited, setCredited] = useState<DepositResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const polling = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      polling.current?.abort();
+    };
+  }, []);
+
+  /** One poll at a time; a new one (or unmounting) cancels the previous. */
+  function startPolling(sig: string): Promise<DepositResult> {
+    polling.current?.abort();
+    const controller = new AbortController();
+    polling.current = controller;
+    return pollDeposit(sig, controller.signal);
+  }
 
   function settle(result: DepositResult) {
+    if (!mounted.current) return;
     if (result.kind === 'timeout') {
       setError(
         'The deposit is still not final after two minutes. It will be credited once it is; check again shortly.',
@@ -101,9 +138,8 @@ export function DepositUsdc({ depositRef }: DepositUsdcProps) {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const parsed = UsdcInputSchema.safeParse(amount.trim());
-    const amountMicro = parsed.success ? usdcStringToMicro(parsed.data) : 0n;
-    if (amountMicro <= 0n) {
+    const amountMicro = parseAmountInput(amount, USDC_DECIMALS);
+    if (amountMicro === null) {
       setFieldError('Enter a USDC amount greater than 0, with up to 6 decimals.');
       return;
     }
@@ -114,15 +150,22 @@ export function DepositUsdc({ depositRef }: DepositUsdcProps) {
     setPhase('signing');
 
     const outcome = await send<DepositResult>({
-      build: ({ payer }) =>
-        Promise.resolve(buildDepositTransaction({ owner: payer, amountMicro, depositRef })),
+      build: async ({ connection, payer }) =>
+        buildDepositTransaction({
+          owner: payer,
+          amountMicro,
+          depositRef,
+          treasuryAta: await resolveTreasuryUsdcAta(connection),
+        }),
       onConfirmed: (sig) => {
         setSignature(sig);
         setPhase('pending');
-        return pollDeposit(sig);
+        return startPolling(sig);
       },
-      invalidate: [['me'], ['ledger']],
+      // The balance lives under `accountKeys.me(wallet)`; the bare prefix matches every wallet.
+      invalidate: [[accountKeys.me(null)[0]]],
     });
+    if (!mounted.current) return;
     if (outcome.signature) setSignature(outcome.signature);
     if (!outcome.ok) {
       setError(outcome.error.message);
@@ -136,8 +179,11 @@ export function DepositUsdc({ depositRef }: DepositUsdcProps) {
     setError(null);
     setPhase('pending');
     try {
-      settle(await pollDeposit(sig));
+      const result = await startPolling(sig);
+      await queryClient.invalidateQueries({ queryKey: [accountKeys.me(null)[0]] });
+      settle(result);
     } catch (cause) {
+      if (!mounted.current) return;
       setError(errorMessage(cause));
       setPhase('error');
     }

@@ -1,6 +1,7 @@
 import { useWallet, type WalletContextState } from '@solana/wallet-adapter-react';
 import { PublicKey } from '@solana/web3.js';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -171,5 +172,45 @@ describe('DepositUsdc', () => {
     fetchMock.mockResolvedValueOnce(credited());
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await waitFor(() => expect(phase()).toBe('credited'));
+  });
+
+  it('refreshes the balance query after "Check again"', async () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    fetchMock.mockImplementation(() => Promise.resolve(pending()));
+    submit('5');
+    await approveInWallet();
+    await act(() => vi.advanceTimersByTimeAsync(DEPOSIT_POLL_INTERVAL_MS * DEPOSIT_POLL_ATTEMPTS));
+    await waitFor(() => expect(phase()).toBe('error'));
+
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(credited());
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(phase()).toBe('credited'));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['me'] });
+    invalidate.mockRestore();
+  });
+
+  it('accepts .5 and 1. as amounts', async () => {
+    fetchMock.mockResolvedValue(credited());
+    submit('.5');
+    await approveInWallet();
+    await waitFor(() => expect(phase()).toBe('credited'));
+    expect(screen.queryByText(/greater than 0/)).toBeNull();
+
+    submit('1.');
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/greater than 0/)).toBeNull();
+  });
+
+  it('stops polling once unmounted', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(pending()));
+    submit('5');
+    await approveInWallet();
+    await waitFor(() => expect(phase()).toBe('pending'));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    cleanup();
+    await act(() => vi.advanceTimersByTimeAsync(DEPOSIT_POLL_INTERVAL_MS * DEPOSIT_POLL_ATTEMPTS));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

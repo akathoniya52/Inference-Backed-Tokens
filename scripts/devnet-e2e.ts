@@ -24,7 +24,9 @@ import {
   USDC_MINT,
 } from '@ibt/chain';
 import {
+  ALL_MODELS,
   connectDb,
+  connection as mongoConnection,
   disconnectDb,
   Models,
   Requests,
@@ -33,7 +35,7 @@ import {
   Types,
   Users,
 } from '@ibt/db';
-import { DAMM_V2_FEE_CONFIG, lamportsToSol } from '@ibt/shared';
+import { lamportsToSol } from '@ibt/shared';
 import { generateDepositRef } from '@ibt/shared/node';
 import {
   Connection,
@@ -46,6 +48,7 @@ import {
 import bs58 from 'bs58';
 
 import {
+  assertRpcCluster,
   CliError,
   EXIT_ERROR,
   EXIT_OK,
@@ -56,6 +59,7 @@ import {
 
 const DEVNET_PUBLIC_RPC = 'https://api.devnet.solana.com';
 const DEFAULT_MONGODB_URI = 'mongodb://localhost:27017/ibt?replicaSet=rs0&directConnection=true';
+const E2E_DB_PREFIX = 'ibt_devnet_e2e_';
 const DEFAULT_JUPITER_PRICE_URL = 'https://lite-api.jup.ag/price/v3';
 const KEEPER_ENV_FILE = fileURLToPath(new URL('../apps/keeper/.env', import.meta.url));
 const HOUR_MS = 3_600_000;
@@ -236,10 +240,27 @@ async function seedRevenue(modelId: Types.ObjectId, userId: Types.ObjectId, at: 
   });
 }
 
-function isolatedMongoUri(raw: string): string {
+function isolatedMongoUri(raw: string): { uri: string; dbName: string } {
   const url = new URL(raw);
-  url.pathname = `/ibt_devnet_e2e_${Date.now()}`;
-  return url.toString();
+  const dbName = `${E2E_DB_PREFIX}${Date.now()}`;
+  url.pathname = `/${dbName}`;
+  return { uri: url.toString(), dbName };
+}
+
+async function dropRunDatabase(dbName: string): Promise<void> {
+  const db = mongoConnection.db;
+  if (!dbName.startsWith(E2E_DB_PREFIX) || db?.databaseName !== dbName) return;
+  try {
+    // Model init (collection + index creation) may still be running; finish it first or it
+    // recreates collections right after the drop.
+    await Promise.all(ALL_MODELS.map((model) => model.init()));
+    await db.dropDatabase();
+    console.log(`dropped database ${dbName}`);
+  } catch (err) {
+    console.log(
+      `warning: could not drop ${dbName}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 runMain(async () => {
@@ -257,7 +278,9 @@ runMain(async () => {
     );
   }
   const rpcUrl = process.env.RPC_URL?.trim() || DEVNET_PUBLIC_RPC;
-  const mongoUri = isolatedMongoUri(process.env.MONGODB_URI?.trim() || DEFAULT_MONGODB_URI);
+  const { uri: mongoUri, dbName } = isolatedMongoUri(
+    process.env.MONGODB_URI?.trim() || DEFAULT_MONGODB_URI,
+  );
   const usdcMint = USDC_MINT.devnet;
 
   const keys = {
@@ -268,6 +291,8 @@ runMain(async () => {
   };
   const chain = new RealChainClient({ rpcUrl, usdcMint });
   const connection = chain.rpc.primary;
+  // Before any funding: with a mainnet RPC, DEVNET_FUNDER_SECRET_KEY would move real SOL.
+  await assertRpcCluster(connection, 'devnet');
   const send = (tx: Transaction, signer: Keypair, extra: Keypair[] = []) =>
     sendAndConfirm({
       connection,
@@ -370,9 +395,6 @@ runMain(async () => {
       CHAIN_MODE: 'real',
       RPC_URL: rpcUrl,
       USDC_MINT: usdcMint.toBase58(),
-      DBC_CONFIG: config.publicKey.toBase58(),
-      DAMM_V2_FEE_CONFIG,
-      TREASURY_WALLET: keys.treasury.publicKey.toBase58(),
       TREASURY_SECRET_KEY: bs58.encode(keys.treasury.secretKey),
       KEEPER_SECRET_KEY: bs58.encode(keys.keeper.secretKey),
       MONGODB_URI: mongoUri,
@@ -464,6 +486,7 @@ runMain(async () => {
       check('claimPositionFee simulates', false, 'DAMM v2 pool not readable');
     }
   } finally {
+    await dropRunDatabase(dbName);
     await disconnectDb();
   }
 

@@ -67,6 +67,7 @@ describe('nightly reconciliation', () => {
     expect(report.drift).toEqual([
       {
         userId: user._id.toHexString(),
+        field: 'balance',
         cachedMicroUsdc: micro(7),
         ledgerMicroUsdc: micro(5),
         fixed: true,

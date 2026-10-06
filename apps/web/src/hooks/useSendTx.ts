@@ -16,7 +16,15 @@ export type SendTxStatus =
   'idle' | 'building' | 'signing' | 'sending' | 'confirming' | 'confirmed' | 'failed';
 
 export type SendTxErrorCode =
-  'wallet_rejected' | 'slippage' | 'blockhash_expired' | 'insufficient_sol' | 'unknown';
+  | 'wallet_rejected'
+  | 'slippage'
+  | 'blockhash_expired'
+  | 'insufficient_sol'
+  | 'insufficient_funds'
+  | 'account_not_found'
+  | 'simulation_failed'
+  | 'transaction_failed'
+  | 'unknown';
 
 export interface SendTxError {
   code: SendTxErrorCode;
@@ -33,6 +41,8 @@ export interface BuildContext {
 
 export interface SendTxRequest<T> {
   build: (ctx: BuildContext) => Promise<Transaction | VersionedTransaction>;
+  /** Runs as soon as the transaction is sent, before confirmation. */
+  onSent?: (signature: string) => void;
   onConfirmed?: (signature: string) => Promise<T> | T;
   /** Query keys to invalidate after `onConfirmed`; every query when omitted. */
   invalidate?: readonly QueryKey[];
@@ -47,7 +57,21 @@ const MESSAGES: Record<Exclude<SendTxErrorCode, 'unknown'>, string> = {
   slippage: 'The price moved beyond your slippage tolerance. Try again or raise the slippage.',
   blockhash_expired: 'The transaction expired before it was confirmed. Please try again.',
   insufficient_sol: 'Not enough SOL to pay for this transaction and its fees.',
+  insufficient_funds: 'Your wallet does not hold enough of this token for that amount.',
+  account_not_found:
+    'A required account does not exist on-chain. If this wallet is new, fund it with SOL first; otherwise reload and try again.',
+  simulation_failed:
+    'The transaction would fail, so it was not sent. Check the amount and your balances, then try again.',
+  transaction_failed:
+    'The transaction failed on-chain. Only the network fee was charged; please try again.',
 };
+
+class TransactionFailedError extends Error {
+  constructor(readonly detail: string) {
+    super(`Transaction failed: ${detail}`);
+    this.name = 'TransactionFailedError';
+  }
+}
 
 class SimulationError extends Error {
   constructor(
@@ -90,10 +114,26 @@ export function mapSendTxError(error: unknown): SendTxError {
     return { code: 'blockhash_expired', message: MESSAGES.blockhash_expired };
   }
   if (/slippage|0x1771/i.test(text)) return { code: 'slippage', message: MESSAGES.slippage };
-  if (/insufficient (lamports|funds for)|no record of a prior credit|AccountNotFound/i.test(text)) {
+  if (/insufficient (lamports|funds for)|no record of a prior credit/i.test(text)) {
     return { code: 'insufficient_sol', message: MESSAGES.insufficient_sol };
   }
+  // SPL Token's InsufficientFunds is custom error 1 (`0x1`); System's is a lamports message above.
+  if (
+    /Error: insufficient funds|custom program error: 0x1\b|"Custom":1\}/i.test(text) ||
+    /\bCustom: ?1\b/.test(text)
+  ) {
+    return { code: 'insufficient_funds', message: MESSAGES.insufficient_funds };
+  }
+  if (/AccountNotFound|account not found/i.test(text)) {
+    return { code: 'account_not_found', message: MESSAGES.account_not_found };
+  }
   if (isApiError(error)) return { code: 'unknown', message: error.message };
+  if (error instanceof SimulationError) {
+    return { code: 'simulation_failed', message: MESSAGES.simulation_failed };
+  }
+  if (error instanceof TransactionFailedError) {
+    return { code: 'transaction_failed', message: MESSAGES.transaction_failed };
+  }
   const message =
     error instanceof Error && error.message ? error.message : 'The transaction failed.';
   return { code: 'unknown', message };
@@ -180,6 +220,7 @@ export function useSendTx(): UseSendTx {
           setStatus('sending');
         }
         setSignature(sent);
+        request.onSent?.(sent);
 
         setStatus('confirming');
         const { value } = await connection.confirmTransaction(
@@ -187,7 +228,7 @@ export function useSendTx(): UseSendTx {
           'confirmed',
         );
         if (value.err !== null) {
-          throw new Error(`Transaction failed: ${JSON.stringify(value.err)}`);
+          throw new TransactionFailedError(JSON.stringify(value.err));
         }
 
         const result = request.onConfirmed ? await request.onConfirmed(sent) : undefined;

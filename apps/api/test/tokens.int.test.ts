@@ -12,7 +12,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { base58Encode } from '../src/lib/base58.js';
 import { toPublicKey } from '../src/lib/publicKey.js';
-import { decimalString } from '../src/modules/tokens/public.js';
+import { QUOTE_CACHE_MS, decimalString } from '../src/modules/tokens/public.js';
+import { QUOTE_LIMIT_PER_MIN } from '../src/modules/tokens/router.js';
 import { errorOf, makeTestApp, newWallet, type TestApp } from './helpers.js';
 
 const signature = () => base58Encode(randomBytes(64));
@@ -181,6 +182,31 @@ describe('tokens: state, quote and settlements', () => {
       amount: 250n,
     });
     expect(quote.amountOut).toBe(expected.amountOut.toString());
+  });
+
+  it('GET /quote shares one chain read per identical quote for a few seconds (API-05)', async () => {
+    const reads = () => t.chain.calls.filter((call) => call.method === 'quoteCurve').length;
+    const url = `/api/tokens/${curveMint}/quote?side=buy&amount=777`;
+    const before = reads();
+    const [a, b] = await Promise.all([request(t.app).get(url), request(t.app).get(url)]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect((await request(t.app).get(url)).status).toBe(200);
+    expect(reads()).toBe(before + 1);
+    t.clock.advance(QUOTE_CACHE_MS);
+    expect((await request(t.app).get(url)).status).toBe(200);
+    expect(reads()).toBe(before + 2);
+  });
+
+  it('GET /quote is rate limited per client IP (API-05)', async () => {
+    const ip = '203.0.113.99';
+    const get = (amount: number) =>
+      request(t.app)
+        .get(`/api/tokens/${curveMint}/quote?side=buy&amount=${amount}`)
+        .set('X-Forwarded-For', ip);
+    for (let i = 1; i <= QUOTE_LIMIT_PER_MIN; i += 1) expect((await get(i)).status).toBe(200);
+    const limited = await get(QUOTE_LIMIT_PER_MIN + 1);
+    expect(limited.status).toBe(429);
+    expect(errorOf(limited).code).toBe('rate_limited');
   });
 
   it('GET /quote once graduated uses the DAMM v2 quote', async () => {

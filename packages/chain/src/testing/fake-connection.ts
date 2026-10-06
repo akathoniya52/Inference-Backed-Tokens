@@ -19,10 +19,22 @@ import type { SendConnection } from '../send.js';
  * How the next `confirmTransaction` behaves:
  * - `confirmed`: the tx lands;
  * - `expired`: blockhash expiry, the tx never landed;
- * - `expired-landed`: blockhash expiry, but `getSignatureStatuses` reports it confirmed;
+ * - `expired-landed`: blockhash expiry, but `getSignatureStatuses` reports it landed;
+ * - `expired-processed`: blockhash expiry, and the status is only ever `processed`;
+ * - `expired-failed`: blockhash expiry, and the tx landed with an on-chain error;
+ * - `failed`: confirmation reports an on-chain error;
  * - an `Error`: thrown as-is (RPC failure).
  */
-export type ConfirmOutcome = 'confirmed' | 'expired' | 'expired-landed' | Error;
+export type ConfirmOutcome =
+  | 'confirmed'
+  | 'expired'
+  | 'expired-landed'
+  | 'expired-processed'
+  | 'expired-failed'
+  | 'failed'
+  | Error;
+
+const ON_CHAIN_ERROR: TransactionError = { InstructionError: [0, { Custom: 1 }] };
 
 export interface SentTx {
   signature: string;
@@ -39,7 +51,15 @@ export class FakeConnection implements SendConnection {
   readonly sent: SentTx[] = [];
   readonly confirmed: BlockheightBasedTransactionConfirmationStrategy[] = [];
   readonly landed = new Set<string>();
+  readonly processedOnly = new Set<string>();
+  readonly failedOnChain = new Set<string>();
   simulationError: TransactionError | null = null;
+  /** `confirmationStatus` reported for landed and failed signatures. */
+  statusCommitment: 'confirmed' | 'finalized' = 'finalized';
+  /** `getBlockHeight('finalized')`; null tracks the latest blockhash height + 1 (expiry finalized). */
+  finalizedHeight: number | null = null;
+  /** `getMinimumLedgerSlot`; 0 means the node keeps full history. */
+  minimumLedgerSlot = 0;
   private readonly confirmQueue: ConfirmOutcome[] = [];
   private readonly sendErrors: Error[] = [];
   private height = 1000;
@@ -92,7 +112,13 @@ export class FakeConnection implements SendConnection {
       this.landed.add(strategy.signature);
       return Promise.resolve(ctx({ err: null }));
     }
+    if (outcome === 'failed') {
+      this.failedOnChain.add(strategy.signature);
+      return Promise.resolve(ctx({ err: ON_CHAIN_ERROR }));
+    }
     if (outcome === 'expired-landed') this.landed.add(strategy.signature);
+    if (outcome === 'expired-processed') this.processedOnly.add(strategy.signature);
+    if (outcome === 'expired-failed') this.failedOnChain.add(strategy.signature);
     return Promise.reject(new TransactionExpiredBlockheightExceededError(strategy.signature));
   }
 
@@ -100,15 +126,31 @@ export class FakeConnection implements SendConnection {
     signatures: string[],
   ): Promise<RpcResponseAndContext<(SignatureStatus | null)[]>> {
     this.log.push('getSignatureStatuses');
-    return Promise.resolve(
-      ctx(
-        signatures.map((s) =>
-          this.landed.has(s)
-            ? { slot: 1, confirmations: null, err: null, confirmationStatus: 'confirmed' as const }
-            : null,
-        ),
-      ),
-    );
+    return Promise.resolve(ctx(signatures.map((s) => this.statusOf(s))));
+  }
+
+  getBlockHeight(_commitment?: Commitment): Promise<number> {
+    this.log.push('getBlockHeight');
+    return Promise.resolve(this.finalizedHeight ?? this.height + 1);
+  }
+
+  getMinimumLedgerSlot(): Promise<number> {
+    this.log.push('getMinimumLedgerSlot');
+    return Promise.resolve(this.minimumLedgerSlot);
+  }
+
+  private statusOf(signature: string): SignatureStatus | null {
+    const base = { slot: 1, confirmations: null };
+    if (this.landed.has(signature)) {
+      return { ...base, err: null, confirmationStatus: this.statusCommitment };
+    }
+    if (this.failedOnChain.has(signature)) {
+      return { ...base, err: ON_CHAIN_ERROR, confirmationStatus: this.statusCommitment };
+    }
+    if (this.processedOnly.has(signature)) {
+      return { ...base, err: null, confirmationStatus: 'processed' };
+    }
+    return null;
   }
 
   simulateTransaction(

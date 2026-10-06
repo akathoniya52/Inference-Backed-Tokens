@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM node:20-bookworm-slim AS base
+FROM node:22-bookworm-slim AS base
 WORKDIR /app
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 COPY package.json ./
@@ -30,10 +30,15 @@ RUN pnpm --filter @ibt/shared --filter @ibt/db --filter @ibt/chain --filter @ibt
   && pnpm prune --prod
 
 # runtime: one image, start command picks api or keeper
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=build --chown=node:node /app /app
+# Root-owned, so `node` cannot rewrite the app; nothing at runtime writes under /app.
+COPY --from=build /app /app
 USER node
 EXPOSE 4000 4001
+# No curl in the slim image. Healthy when the running process answers /healthz: the api on
+# PORT (default 4000) or the keeper on KEEPER_PORT (default 4001).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["node", "-e", "Promise.any([process.env.PORT||4000,process.env.KEEPER_PORT||4001].map(async(p)=>{const r=await fetch(`http://127.0.0.1:${p}/healthz`,{signal:AbortSignal.timeout(4000)});if(!r.ok)throw new Error(String(r.status))})).then(()=>process.exit(0),()=>process.exit(1))"]
 CMD ["node", "apps/api/dist/main.js"]

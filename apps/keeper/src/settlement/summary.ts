@@ -39,6 +39,6 @@ export function settlementSummary(settlement: SettlementDoc) {
 }
 
 export const outcomeSummary = (outcome: SettlementOutcome) =>
-  'skipped' in outcome
+  'skipped' in outcome || 'error' in outcome
     ? outcome
     : { model: outcome.model, resumed: outcome.resumed, ...settlementSummary(outcome.settlement) };

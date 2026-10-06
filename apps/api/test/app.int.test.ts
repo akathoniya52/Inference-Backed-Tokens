@@ -22,6 +22,9 @@ describe('app factory', () => {
           await Promise.resolve();
           throw new Error('async boom');
         });
+        app.get('/__test/internal-detail', () => {
+          throw new AppError('internal', { message: 'hold 65f0c0ffee is expired' });
+        });
         app.get('/__test/app-error', () => {
           throw new AppError('forbidden', { message: 'nope' });
         });
@@ -92,7 +95,7 @@ describe('app factory', () => {
     });
   });
 
-  it.each(['/__test/boom', '/__test/async-boom'])(
+  it.each(['/__test/boom', '/__test/async-boom', '/__test/internal-detail'])(
     '%s returns 500 without leaking',
     async (path) => {
       const res = await request(t.app).get(path);
@@ -100,7 +103,8 @@ describe('app factory', () => {
       expect(res.body).toEqual({
         error: { code: 'internal', message: 'internal error', requestId: res.get('x-request-id') },
       });
-      expect(res.text).not.toMatch(/boom|stack|\bat \w/);
+      // API-15: a 5xx AppError's own message (ids, state) stays in the logs.
+      expect(res.text).not.toMatch(/boom|stack|\bat \w|65f0c0ffee/);
     },
   );
 

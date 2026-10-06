@@ -40,7 +40,10 @@ export type ErrorCode = keyof typeof ERROR_CATALOG;
 export type ErrorDetails = Readonly<Record<string, string | number | boolean | null>>;
 
 export interface AppErrorOptions {
-  /** Public message; defaults to the catalog message. Never put secrets here. */
+  /**
+   * Public message; defaults to the catalog message. Never put secrets here.
+   * For 5xx codes it is kept on `message` for logs only; clients get the catalog message.
+   */
   message?: string;
   /** Extra public fields placed inside `error`, e.g. `shortfallUsdc`. */
   details?: ErrorDetails;
@@ -59,12 +62,12 @@ export class AppError extends Error {
 
   constructor(code: ErrorCode, options: AppErrorOptions = {}) {
     const catalog = ERROR_CATALOG[code];
-    const publicMessage = options.message ?? catalog.message;
-    super(publicMessage, options.cause === undefined ? undefined : { cause: options.cause });
+    const message = options.message ?? catalog.message;
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'AppError';
     this.code = code;
     this.httpStatus = catalog.httpStatus;
-    this.publicMessage = publicMessage;
+    this.publicMessage = catalog.httpStatus >= 500 ? catalog.message : message;
     this.retryable = catalog.retryable;
     this.details = options.details ?? {};
     this.requestId = options.requestId;

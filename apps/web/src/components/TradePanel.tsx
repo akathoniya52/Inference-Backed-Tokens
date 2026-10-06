@@ -1,12 +1,13 @@
-import { parseUnits, type Model } from '@ibt/shared';
+import type { Model } from '@ibt/shared';
 import { useWallet } from '@solana/wallet-adapter-react';
-import { PublicKey } from '@solana/web3.js';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 
 import { useQuote } from '../hooks/useQuote';
 import { useSendTx, type SendTxStatus } from '../hooks/useSendTx';
+import { parseAmountInput } from '../lib/amount';
 import { formatPct, formatUnits, shortAddress } from '../lib/format';
 import { publicQueryKeys } from '../lib/queries';
+import { parsePublicKey } from '../lib/solana';
 import { txUrl } from '../lib/solscan';
 import {
   buildTradeTransaction,
@@ -33,31 +34,20 @@ const TX_PROGRESS: Partial<Record<SendTxStatus, string>> = {
   confirming: 'Confirming on-chain…',
 };
 
+/** `null` (trading closed) rather than a render-time throw when the API sends a bad address. */
 export function tradeTarget(model: Model): TradeTarget | null {
   const { token } = model;
-  if (token.status === 'curve' && token.dbcPool !== null && token.mint !== null) {
-    return { phase: 'curve', pool: new PublicKey(token.dbcPool), mint: new PublicKey(token.mint) };
+  const mint = parsePublicKey(token.mint);
+  if (mint === null) return null;
+  if (token.status === 'curve') {
+    const pool = parsePublicKey(token.dbcPool);
+    return pool === null ? null : { phase: 'curve', pool, mint };
   }
-  if (token.status === 'graduated' && token.dammV2Pool !== null && token.mint !== null) {
-    return {
-      phase: 'graduated',
-      pool: new PublicKey(token.dammV2Pool),
-      mint: new PublicKey(token.mint),
-    };
+  if (token.status === 'graduated') {
+    const pool = parsePublicKey(token.dammV2Pool);
+    return pool === null ? null : { phase: 'graduated', pool, mint };
   }
   return null;
-}
-
-function parseAmount(value: string, decimals: number): bigint | null {
-  const trimmed = value.trim();
-  if (trimmed === '') return null;
-  try {
-    const amount = parseUnits(trimmed, decimals);
-    return amount > 0n ? amount : null;
-  } catch (error) {
-    if (error instanceof RangeError) return null;
-    throw error;
-  }
 }
 
 function useDebounced<T>(value: T, delayMs: number): T {
@@ -97,7 +87,7 @@ export function TradePanel({ model }: { model: Model }) {
   const symbol = model.token.symbol ?? 'TOKEN';
   const inUnit = side === 'buy' ? 'SOL' : `$${symbol}`;
   const outUnit = side === 'buy' ? `$${symbol}` : 'SOL';
-  const amountIn = parseAmount(amount, inputDecimals(side));
+  const amountIn = parseAmountInput(amount, inputDecimals(side));
   const invalid = amount.trim() !== '' && amountIn === null;
   const debouncedAmount = useDebounced(amountIn, QUOTE_DEBOUNCE_MS);
   const quote = useQuote(target, side, debouncedAmount, slippageBps);

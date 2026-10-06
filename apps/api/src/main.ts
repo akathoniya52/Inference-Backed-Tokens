@@ -3,12 +3,12 @@ import './version-check.js';
 import type { ChainClient } from '@ibt/chain';
 import { RealChainClient, USDC_MINT } from '@ibt/chain';
 import { createFakeChain, type FakeChainTx } from '@ibt/chain/testing';
-import { connectDb, connection, disconnectDb, syncAllIndexes } from '@ibt/db';
+import { connectDb, connection, createAllIndexes, disconnectDb } from '@ibt/db';
 import { createAlerter, createLogger, startSelfPing } from '@ibt/shared/node';
 
 import { createApp } from './app.js';
-import { loadEnv, type ApiEnv } from './env.js';
-import { loopbackAllowlistBehindProxy } from './middleware/adminAuth.js';
+import { clientsShareProxyIp, loadEnv, type ApiEnv } from './env.js';
+import { allowlistTrustsAnyHop, loopbackAllowlistBehindProxy } from './middleware/adminAuth.js';
 
 const SHUTDOWN_GRACE_MS = 10_000;
 
@@ -45,10 +45,21 @@ async function main(): Promise<void> {
       { trustProxy: env.TRUST_PROXY, adminIpAllowlist: env.ADMIN_IP_ALLOWLIST },
       'ADMIN_IP_ALLOWLIST holds only loopback addresses while TRUST_PROXY is on: if the api is reachable without the proxy, a spoofed X-Forwarded-For satisfies it',
     );
+  } else if (allowlistTrustsAnyHop(env)) {
+    logger.warn(
+      { trustProxy: env.TRUST_PROXY },
+      'ADMIN_IP_ALLOWLIST is set while TRUST_PROXY trusts any hop: make sure the api is reachable only through the proxy, or set TRUST_PROXY to the proxy subnets',
+    );
+  }
+  if (clientsShareProxyIp(env)) {
+    logger.warn(
+      'TRUST_PROXY is false in production: behind a load balancer every client shares its IP and per-IP limits; set TRUST_PROXY to the proxy hop count or subnets',
+    );
   }
 
   await connectDb(env.MONGODB_URI);
-  await syncAllIndexes();
+  // API-14: create what is missing, never drop; `syncAllIndexes` is a migration step.
+  await createAllIndexes();
 
   const app = createApp({
     env,

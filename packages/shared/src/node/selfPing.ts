@@ -37,7 +37,9 @@ export function startSelfPing({
   if (!baseUrl) {
     return { ping: () => Promise.resolve(), stop: () => undefined };
   }
-  const url = new URL(path, baseUrl).toString();
+  // Relative to the base's own path: `new URL('/healthz', 'https://host/api')` would drop `/api`.
+  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  const url = new URL(path.replace(/^\/+/, ''), base).toString();
 
   const ping = async (): Promise<void> => {
     try {

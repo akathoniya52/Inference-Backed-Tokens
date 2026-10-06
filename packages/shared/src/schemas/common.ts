@@ -8,6 +8,7 @@ import {
   MAX_PAGE_LIMIT,
   USDC_DECIMALS,
 } from '../constants.js';
+import { usdcStringToMicro } from '../money.js';
 
 function base58OfLength(bytes: number, label: string) {
   // Longest base58 text of `bytes` bytes (44 for a key, 88 for a signature),
@@ -36,10 +37,25 @@ export const DecimalStringSchema = z.string().regex(/^-?\d+(\.\d+)?$/, 'must be 
 export const UsdcAmountSchema = z
   .string()
   .regex(new RegExp(`^-?\\d+\\.\\d{${USDC_DECIMALS}}$`), 'must be USDC with 6 decimals');
-/** USDC typed by a user: non-negative, up to 6 decimals. */
+/** Largest micro-USDC amount a mongoose `BigInt` (int64) field stores. */
+export const MAX_INT64 = 2n ** 63n - 1n;
+/** Largest on-chain `u64` amount (lamports, token base units). */
+export const MAX_U64 = 2n ** 64n - 1n;
+
+/**
+ * USDC typed by a user: non-negative, up to 6 decimals, and at most `MAX_INT64`
+ * micro so it can be stored (API-08). Length and shape abort before the bound is parsed.
+ */
 export const UsdcInputSchema = z
   .string()
-  .regex(new RegExp(`^\\d+(\\.\\d{1,${USDC_DECIMALS}})?$`), 'must be USDC with up to 6 decimals');
+  .max(32, { message: 'USDC amount is too long', abort: true })
+  .regex(new RegExp(`^\\d+(\\.\\d{1,${USDC_DECIMALS}})?$`), {
+    message: 'must be USDC with up to 6 decimals',
+    abort: true,
+  })
+  .refine((value) => usdcStringToMicro(value) <= MAX_INT64, {
+    message: 'USDC amount is too large',
+  });
 
 export const BpsSchema = z.int().min(0).max(BPS_DENOMINATOR);
 export const SplitsSchema = z

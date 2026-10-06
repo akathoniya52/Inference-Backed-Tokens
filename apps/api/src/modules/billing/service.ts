@@ -16,6 +16,7 @@ import {
   MeResponseSchema,
   UsageResponseSchema,
   microToUsdcString,
+  usageRangeEndMs,
   type DepositResponse,
   type LedgerEntry,
   type LedgerResponse,
@@ -32,7 +33,6 @@ import { cursorFilter, toPage } from '../../pagination.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_USAGE_DAYS = 30;
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
 const REJECTION_MESSAGES: Record<DepositRejection, string> = {
   tx_not_found: 'transaction not found',
@@ -43,6 +43,7 @@ const REJECTION_MESSAGES: Record<DepositRejection, string> = {
   wrong_destination: 'no transfer to the treasury USDC account',
   wrong_mint: 'transfer is not USDC',
   zero_amount: 'transfer amount is zero',
+  unsigned_transfer: 'transfer was not authorised by a transaction signer',
 };
 
 function treasuryAta(ctx: AppContext) {
@@ -93,10 +94,17 @@ export async function submitDeposit(
   });
 
   if (!result.ok) {
+    // API-09: an unknown signature may simply not be indexed yet (or be random);
+    // either way it is retryable and never recorded or alerted as a rejection.
+    if (result.reason === 'tx_not_found') {
+      throw new AppError('deposit_pending', {
+        message: 'transaction not found yet; retry shortly',
+      });
+    }
     // Landed at `confirmed` but not yet `finalized`: retryable, and not a rejection.
-    if (result.reason === 'tx_not_found' || result.reason === 'not_finalized') {
+    if (result.reason === 'not_finalized') {
       const status = await ctx.chain.signatureStatus(txSignature);
-      if (status === 'landed') throw new AppError('deposit_pending');
+      if (status === 'landed' || status === 'pending') throw new AppError('deposit_pending');
     }
     await recordRejection(ctx, user._id, txSignature, result.reason);
     throw new AppError('deposit_invalid', { message: REJECTION_MESSAGES[result.reason] });
@@ -175,9 +183,7 @@ export async function listLedger(userId: string, query: PaginationQuery): Promis
 
 /** A date-only `to` covers that whole UTC day. */
 function usageRange(ctx: AppContext, query: UsageQuery): { from: Date; to: Date } {
-  const to = query.to
-    ? new Date(Date.parse(query.to) + (DATE_ONLY.test(query.to) ? DAY_MS : 0))
-    : ctx.clock();
+  const to = query.to ? new Date(usageRangeEndMs(query.to)) : ctx.clock();
   const from = query.from
     ? new Date(Date.parse(query.from))
     : new Date(to.getTime() - DEFAULT_USAGE_DAYS * DAY_MS);

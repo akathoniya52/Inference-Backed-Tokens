@@ -1,9 +1,12 @@
-import { Idempotency, Ledger, Models, Requests, Types, adjust } from '@ibt/db';
+import { Idempotency, Ledger, Models, Requests, Types, adjust, claimIdempotencyRow } from '@ibt/db';
 import { createMockUpstream, type MockUpstream } from '@ibt/mock-upstream';
 import { ChatCompletionResponseSchema, MeResponseSchema } from '@ibt/shared';
 import { encrypt } from '@ibt/shared/node';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+import { requestHash } from '../src/modules/gateway/idempotency.js';
+import { SseCompletionParser } from '../src/modules/gateway/sse.js';
 
 import {
   bearer,
@@ -73,6 +76,7 @@ describe('gateway: idempotency keys', () => {
     await seedModel('idem-ok', 'upstream-ok');
     await seedModel('idem-slow', 'upstream:slow-first-byte');
     await seedModel('idem-flaky', 'upstream:error500');
+    await seedModel('idem-cut', 'upstream:stream-no-done');
   });
 
   afterAll(async () => {
@@ -160,6 +164,88 @@ describe('gateway: idempotency keys', () => {
     });
     expect(replay.get('X-Cost-Usdc')).toBeDefined();
     expect(await counts(c.userId)).toEqual({ holds: 1, captures: 1, requests: 1 });
+  });
+
+  it('a stream billed but cut short never frees its key (GW-05)', async () => {
+    const c = await consumer();
+    const body = { model: 'idem-cut', messages: hello, stream: true };
+    const first = await chat(c, 'cut-1', body);
+    expect(first.status).toBe(200);
+    expect(await counts(c.userId)).toEqual({ holds: 1, captures: 1, requests: 1 });
+
+    const retry = await chat(c, 'cut-1', body);
+    expect(retry.status).toBe(400);
+    expect(retry.get('Idempotency-Replayed')).toBe('true');
+    expect(errorOf(retry).message).toContain('cannot be replayed');
+    expect(retry.get('X-Cost-Usdc')).toBeDefined();
+    expect(await counts(c.userId)).toEqual({ holds: 1, captures: 1, requests: 1 });
+  });
+
+  it('an error after a stream was captured keeps its key locked, so a retry bills once', async () => {
+    const c = await consumer();
+    const body = { model: 'idem-ok', messages: hello, stream: true };
+    const spy = vi.spyOn(SseCompletionParser.prototype, 'assemble').mockImplementationOnce(() => {
+      throw new Error('assemble failed');
+    });
+    await chat(c, 'assemble-fails', body).catch(() => undefined);
+    spy.mockRestore();
+    expect(await counts(c.userId)).toEqual({ holds: 1, captures: 1, requests: 1 });
+
+    const retry = await chat(c, 'assemble-fails', body);
+    expect(retry.status).toBe(400);
+    expect(retry.get('Idempotency-Replayed')).toBe('true');
+    expect(errorOf(retry).message).toContain('cannot be replayed');
+    expect(await counts(c.userId)).toEqual({ holds: 1, captures: 1, requests: 1 });
+  });
+
+  it('a billed call whose response cannot be stored keeps its key locked (GW-05)', async () => {
+    const c = await consumer();
+    const body = { model: 'idem-ok', messages: hello };
+    const spy = vi.spyOn(Idempotency, 'updateOne').mockRejectedValueOnce(new Error('db blip'));
+    const first = await chat(c, 'store-fails', body);
+    spy.mockRestore();
+    expect(first.status).toBe(200);
+    const retry = await chat(c, 'store-fails', body);
+    expect(retry.status).toBe(409);
+    expect(errorOf(retry).code).toBe('idempotency_in_progress');
+    expect((await counts(c.userId)).captures).toBe(1);
+  });
+
+  it('a claim whose process died is taken over once its lock expires (GW-06)', async () => {
+    const c = await consumer();
+    const body = { model: 'idem-ok', messages: hello };
+    const hash = requestHash(body);
+    await claimIdempotencyRow(c.userId, 'crashed', hash, {
+      lockMs: 1_000,
+      now: new Date(t.clock.now().getTime() - 60_000),
+    });
+    const res = await chat(c, 'crashed', body);
+    expect(res.status).toBe(200);
+    expect(res.get('Idempotency-Replayed')).toBeUndefined();
+    const replay = await chat(c, 'crashed', body);
+    expect(replay.get('Idempotency-Replayed')).toBe('true');
+    expect((await counts(c.userId)).captures).toBe(1);
+
+    // A live lock still answers 409.
+    await claimIdempotencyRow(c.userId, 'live', hash, { lockMs: 600_000, now: t.clock.now() });
+    expect((await chat(c, 'live', body)).status).toBe(409);
+  });
+
+  it('hashes the body canonically, so key order does not matter (GW-11)', async () => {
+    const c = await consumer();
+    const first = await chat(c, 'order', { model: 'idem-ok', messages: hello, max_tokens: 16 });
+    expect(first.status).toBe(200);
+    const reordered = await chat(c, 'order', {
+      max_tokens: 16,
+      messages: [{ content: 'Idempotent hello', role: 'user' }],
+      model: 'idem-ok',
+    });
+    expect(reordered.status).toBe(200);
+    expect(reordered.get('Idempotency-Replayed')).toBe('true');
+    expect(requestHash({ a: 1, b: { c: [1, { e: 2, d: 3 }] } })).toBe(
+      requestHash({ b: { c: [1, { d: 3, e: 2 }] }, a: 1 }),
+    );
+    expect(requestHash({ a: [1, 2] })).not.toBe(requestHash({ a: [2, 1] }));
   });
 
   it('rejects a reused key with a different body and an over-long key', async () => {

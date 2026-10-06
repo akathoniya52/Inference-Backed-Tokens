@@ -1,11 +1,12 @@
 import { randomBytes } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 
 import { Models, Types } from '@ibt/db';
 import { MeResponseSchema } from '@ibt/shared';
 import type { Alerter } from '@ibt/shared/node';
 import { pino } from 'pino';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   ERROR_RATE_MIN_SAMPLE,
@@ -14,6 +15,7 @@ import {
   createApiAlerts,
 } from '../src/alerts.js';
 import { base58Encode } from '../src/lib/base58.js';
+import { buildDepositTx } from './depositTx.js';
 import {
   bearer,
   createRecordingAlerter,
@@ -126,6 +128,43 @@ describe('rolling alert counters (unit, fake clock)', () => {
     ]);
   });
 
+  it('a response marked failed after its headers counts as a 5xx, once (API-12)', () => {
+    const { alerter, alerts, record } = setup();
+    const middleware = alerts.middleware();
+    record(200, ERROR_RATE_MIN_SAMPLE - 2);
+    for (let i = 0; i < 2; i += 1) {
+      const res = Object.assign(new EventEmitter(), { statusCode: 200 });
+      const next = vi.fn();
+      middleware(
+        {} as Parameters<typeof middleware>[0],
+        res as unknown as Parameters<typeof middleware>[1],
+        next,
+      );
+      expect(next).toHaveBeenCalledOnce();
+      alerts.markFailed(res);
+      // A destroyed response emits only `close`; `finish` after it must not count twice.
+      res.emit('close');
+      res.emit('finish');
+    }
+    expect(alerter.alerts.map((a) => a.body)).toEqual([
+      { errors: 2, total: ERROR_RATE_MIN_SAMPLE, ratePct: 4 },
+    ]);
+  });
+
+  it('keeps one counter per second however many responses arrive (API-13)', () => {
+    const { clock, alerter, record } = setup();
+    record(200, 100_000);
+    clock.advance(ERROR_RATE_WINDOW_MS - 1_000);
+    record(500, 3);
+    expect(alerter.alerts.map((a) => a.body)).toEqual([]);
+    clock.advance(2_000);
+    record(500, 3);
+    // The 100k successes left the window: 6 of 6 failed, but below the sample floor.
+    expect(alerter.alerts).toHaveLength(0);
+    record(500, ERROR_RATE_MIN_SAMPLE);
+    expect(alerter.alerts).toHaveLength(1);
+  });
+
   it('a failing alerter never throws into the request path', async () => {
     const failing: Alerter = { alert: () => Promise.reject(new Error('telegram down')) };
     const clock = createTestClock();
@@ -166,12 +205,24 @@ describe('alert hooks in the app', () => {
   it('rejected deposits from POST /api/billing/deposits trip the hourly counter', async () => {
     const jwt = await signIn(t.app, newWallet().keypair);
     const before = t.alerter.alerts.length;
-    for (let i = 0; i < 6; i += 1) {
-      const res = await request(t.app)
+    const post = (txSignature: string) =>
+      request(t.app)
         .post('/api/billing/deposits')
         .set('Authorization', bearer(jwt))
-        .send({ txSignature: base58Encode(randomBytes(64)) });
-      expect(res.status).toBe(422);
+        .send({ txSignature });
+    // API-09: unknown signatures are retryable and never count toward the alert
+    // (4 of them, so the 10/min deposit limit leaves room for the 6 rejections).
+    for (let i = 0; i < 4; i += 1) {
+      expect((await post(base58Encode(randomBytes(64)))).status).toBe(202);
+    }
+    expect(t.alerter.alerts.slice(before)).toEqual([]);
+    for (let i = 0; i < 6; i += 1) {
+      const signature = base58Encode(randomBytes(64));
+      t.chain.setParsedTx(
+        signature,
+        buildDepositTx({ signature, memo: 'not-my-ref', treasuryWallet: t.env.TREASURY_WALLET }),
+      );
+      expect((await post(signature)).status).toBe(422);
     }
     const fired = t.alerter.alerts.slice(before);
     expect(fired).toEqual([

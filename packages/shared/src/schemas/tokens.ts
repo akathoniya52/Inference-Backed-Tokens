@@ -5,6 +5,7 @@ import {
   BaseUnitsSchema,
   DecimalStringSchema,
   IsoDateTimeSchema,
+  MAX_U64,
   ObjectIdSchema,
   PaginationQuerySchema,
   PublicKeySchema,
@@ -24,6 +25,8 @@ export const LaunchPrepareRequestSchema = z.object({
 });
 export const LaunchPrepareResponseSchema = z.object({
   token: z.object({ status: z.literal('pending'), mint: PublicKeySchema }),
+  /** The token metadata URI confirm requires (API-06); absent when the api checks none. */
+  metadataUri: z.url({ protocol: /^https?$/ }).optional(),
 });
 
 export const LaunchConfirmRequestSchema = z.object({
@@ -53,8 +56,12 @@ export const TokenStateResponseSchema = z.object({
 
 export const QuoteQuerySchema = z.object({
   side: z.enum(['buy', 'sell']),
-  /** Lamports when buying, token base units when selling. */
-  amount: z.string().regex(/^[1-9]\d*$/, 'amount must be a positive integer string'),
+  /** Lamports when buying, token base units when selling; a `u64` on chain. */
+  amount: z
+    .string()
+    .max(MAX_U64.toString().length, { message: 'amount is too large', abort: true })
+    .regex(/^[1-9]\d*$/, { message: 'amount must be a positive integer string', abort: true })
+    .refine((value) => BigInt(value) <= MAX_U64, { message: 'amount is too large' }),
 });
 export const QuoteResponseSchema = z.object({
   side: z.enum(['buy', 'sell']),

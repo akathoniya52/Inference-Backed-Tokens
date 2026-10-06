@@ -33,6 +33,8 @@ export interface LeaseGuard {
 /** What one run may still pay providers (`MAX_PAYOUT_USDC_PER_RUN` across all models). */
 export interface PayoutBudget {
   remainingMicroUsdc: bigint;
+  /** Settlements whose payout this run already charged (at reservation or at send). */
+  charged: Set<string>;
 }
 
 /** Everything a keeper job or settlement step needs; tests build it with `makeKeeperCtx()`. */

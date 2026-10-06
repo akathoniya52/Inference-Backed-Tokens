@@ -1,6 +1,7 @@
 import { createBrowserRouter, type RouteObject } from 'react-router-dom';
 
 import { Layout } from './components/Layout';
+import { RouteError } from './components/RouteError';
 import { DashboardPage } from './pages/DashboardPage';
 import { DocsPage } from './pages/DocsPage';
 import { ExplorePage } from './pages/ExplorePage';
@@ -13,29 +14,26 @@ import { TokenPage } from './pages/TokenPage';
 export const routes: RouteObject[] = [
   {
     element: <Layout />,
+    // Catches a throw in the layout itself; page errors stop at the child below.
+    errorElement: <RouteError />,
     children: [
-      { index: true, element: <ExplorePage /> },
-      { path: 't/:slug', element: <TokenPage /> },
-      { path: 'launch', element: <LaunchPage /> },
-      { path: 'dashboard', element: <DashboardPage /> },
-      { path: 'provider', element: <ProviderPage /> },
-      { path: 'docs', element: <DocsPage /> },
-      { path: '*', element: <NotFoundPage /> },
+      {
+        // Pathless, so a page error renders inside the layout and the nav stays usable.
+        errorElement: <RouteError />,
+        children: [
+          { index: true, element: <ExplorePage /> },
+          { path: 't/:slug', element: <TokenPage /> },
+          { path: 'launch', element: <LaunchPage /> },
+          { path: 'dashboard', element: <DashboardPage /> },
+          { path: 'provider', element: <ProviderPage /> },
+          { path: 'docs', element: <DocsPage /> },
+          { path: '*', element: <NotFoundPage /> },
+        ],
+      },
     ],
   },
 ];
 
-// Opt into the v7 behaviours now so the upgrade is a no-op and dev logs stay clean.
-export const routerFuture = {
-  v7_fetcherPersist: true,
-  v7_normalizeFormMethod: true,
-  v7_partialHydration: true,
-  v7_relativeSplatPath: true,
-  v7_skipActionErrorRevalidation: true,
-} as const;
-
-export const routerProviderFuture = { v7_startTransition: true } as const;
-
 export function createAppRouter(): ReturnType<typeof createBrowserRouter> {
-  return createBrowserRouter(routes, { future: routerFuture });
+  return createBrowserRouter(routes);
 }

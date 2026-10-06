@@ -31,7 +31,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20.20.2
+          node-version: 22
 
       - name: Enable pnpm via corepack
         run: corepack enable && corepack pnpm --version
@@ -93,19 +93,17 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Secrets are set per step (below), so `pnpm install` lifecycle scripts never see them.
     env:
       DEVNET_E2E: '1'
       CLUSTER: devnet
-      DEVNET_RPC_URL: ${{ secrets.DEVNET_RPC_URL }}
-      RPC_URL: ${{ secrets.DEVNET_RPC_URL }}
-      JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
       MONGODB_URI: mongodb://localhost:27017/ibt?replicaSet=rs0&directConnection=true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20.20.2
+          node-version: 22
 
       - name: Enable pnpm via corepack
         run: corepack enable
@@ -123,18 +121,30 @@ jobs:
 
       - run: corepack pnpm install --frozen-lockfile
 
+      # `if:` cannot read secrets, so this step turns DEVNET_RPC_URL into a plain flag.
+      - name: Check for the DEVNET_RPC_URL secret
+        id: devnet
+        env:
+          DEVNET_RPC_URL: ${{ secrets.DEVNET_RPC_URL }}
+        run: |
+          if [ -n "$DEVNET_RPC_URL" ]; then enabled=true; else enabled=false; fi
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
       - name: Skip notice
-        if: env.DEVNET_RPC_URL == ''
+        if: steps.devnet.outputs.enabled != 'true'
         run: echo "DEVNET_RPC_URL secret is not set; devnet e2e skipped."
 
       # The script's keys are throwaway and live in memory only; settle:once
       # loads apps/keeper/.env, whose placeholders the script overrides.
       - name: Start mongo and the keeper env file
-        if: env.DEVNET_RPC_URL != ''
+        if: steps.devnet.outputs.enabled == 'true'
         run: |
           docker compose up -d --wait mongo
           cp apps/keeper/.env.example apps/keeper/.env
 
       - name: Devnet e2e (skipped unless the DEVNET_RPC_URL secret is set)
-        if: env.DEVNET_RPC_URL != ''
+        if: steps.devnet.outputs.enabled == 'true'
+        env:
+          RPC_URL: ${{ secrets.DEVNET_RPC_URL }}
+          JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
         run: corepack pnpm exec tsx --conditions=development scripts/devnet-e2e.ts

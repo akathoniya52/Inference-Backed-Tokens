@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { loadEnv } from '../src/env.js';
-import { loopbackAllowlistBehindProxy } from '../src/middleware/adminAuth.js';
+import { clientsShareProxyIp, loadEnv } from '../src/env.js';
+import {
+  allowlistTrustsAnyHop,
+  loopbackAllowlistBehindProxy,
+} from '../src/middleware/adminAuth.js';
 
 const WALLET = '11111111111111111111111111111111';
 
@@ -130,5 +133,56 @@ describe('loopbackAllowlistBehindProxy (startup warning)', () => {
     expect(flagged({ ADMIN_IP_ALLOWLIST: '127.0.0.1', TRUST_PROXY: '0' })).toBe(false);
     expect(flagged({})).toBe(false);
     expect(flagged({ ADMIN_IP_ALLOWLIST: '127.0.0.1, 10.0.0.5' })).toBe(false);
+  });
+});
+
+describe('production proxy and admin settings (API-01)', () => {
+  const mainnet = {
+    ...base,
+    CLUSTER: 'mainnet-beta',
+    USDC_MINT: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+    TRUST_PROXY: '1',
+    ADMIN_IP_ALLOWLIST: '203.0.113.7',
+    API_PUBLIC_URL: 'https://api.example.com/',
+  };
+
+  it('requires an explicit TRUST_PROXY other than `true` in production and on mainnet', () => {
+    const { TRUST_PROXY: _trust, ...unset } = mainnet;
+    expect(() => loadEnv(unset)).toThrow('TRUST_PROXY');
+    expect(() => loadEnv({ ...mainnet, TRUST_PROXY: 'true' })).toThrow('TRUST_PROXY');
+    expect(() => loadEnv({ ...base, NODE_ENV: 'production' })).toThrow('TRUST_PROXY');
+    expect(
+      loadEnv({ ...base, NODE_ENV: 'production', TRUST_PROXY: '10.0.0.0/8' }).TRUST_PROXY,
+    ).toBe('10.0.0.0/8');
+    expect(loadEnv(mainnet).TRUST_PROXY).toBe(1);
+    expect(loadEnv({ ...mainnet, TRUST_PROXY: 'false' }).TRUST_PROXY).toBe(false);
+    // Dev keeps its default.
+    expect(loadEnv(base).TRUST_PROXY).toBe(1);
+  });
+
+  it('refuses an empty ADMIN_IP_ALLOWLIST and a missing API_PUBLIC_URL on mainnet', () => {
+    const { ADMIN_IP_ALLOWLIST: _allow, ...noAllowlist } = mainnet;
+    expect(() => loadEnv(noAllowlist)).toThrow('ADMIN_IP_ALLOWLIST');
+    const { API_PUBLIC_URL: _url, ...noUrl } = mainnet;
+    expect(() => loadEnv(noUrl)).toThrow('API_PUBLIC_URL');
+    expect(loadEnv(mainnet).API_PUBLIC_URL).toBe('https://api.example.com');
+  });
+
+  it('warns for any allowlist while TRUST_PROXY trusts a hop count or every hop', () => {
+    const flagged = (extra: Record<string, string>) =>
+      allowlistTrustsAnyHop(loadEnv({ ...base, ...extra }));
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '203.0.113.7' })).toBe(true);
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '203.0.113.7', TRUST_PROXY: 'true' })).toBe(true);
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '203.0.113.7', TRUST_PROXY: '10.0.0.0/8' })).toBe(false);
+    expect(flagged({ ADMIN_IP_ALLOWLIST: '203.0.113.7', TRUST_PROXY: 'false' })).toBe(false);
+    expect(flagged({})).toBe(false);
+  });
+
+  it('warns when production runs without trust proxy, as clients share the proxy IP', () => {
+    const shared = (extra: Record<string, string>) =>
+      clientsShareProxyIp(loadEnv({ ...base, ...extra }));
+    expect(shared({ NODE_ENV: 'production', TRUST_PROXY: 'false' })).toBe(true);
+    expect(shared({ NODE_ENV: 'production', TRUST_PROXY: '1' })).toBe(false);
+    expect(shared({ TRUST_PROXY: 'false' })).toBe(false);
   });
 });

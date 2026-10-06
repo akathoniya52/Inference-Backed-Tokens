@@ -31,6 +31,10 @@ describe('isPublicAddress', () => {
     '::ffff:169.254.169.254',
     '::ffff:10.0.0.1',
     '::127.0.0.1',
+    // GW-12: SIIT IPv4-translated addresses.
+    '::ffff:0:7f00:1',
+    '::ffff:0:a9fe:a9fe',
+    '::ffff:0:808:808',
     '64:ff9b::a9fe:a9fe',
     '2002:7f00:1::',
     'fc00::1',

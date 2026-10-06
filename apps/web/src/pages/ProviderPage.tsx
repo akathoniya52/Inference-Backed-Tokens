@@ -23,7 +23,7 @@ import {
   formatUsdc,
   shortAddress,
 } from '../lib/format';
-import { publicQueryKeys, useProviderModels, useSettlements } from '../lib/queries';
+import { isUnlaunched, publicQueryKeys, useProviderModels, useSettlements } from '../lib/queries';
 import { txUrl } from '../lib/solscan';
 
 const SECTION_LABEL = 'font-mono text-xs uppercase tracking-label text-ink-400';
@@ -251,6 +251,15 @@ function ProviderModel({ model }: { model: Model }) {
             <p className="mt-2 text-sm text-ink-400">
               Launch a token to earn a share of every trade&apos;s fee.
             </p>
+            {isUnlaunched(model) && (
+              <Link
+                to={`/launch?${new URLSearchParams({ model: model.slug }).toString()}`}
+                className={`${GHOST_BUTTON} mt-4`}
+                aria-label={`Continue launch of ${model.name}`}
+              >
+                Continue launch
+              </Link>
+            )}
           </div>
         )}
       </aside>

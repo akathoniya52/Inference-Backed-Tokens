@@ -1,5 +1,5 @@
 import type { DammPoolDto, DbcPoolDto } from '@ibt/chain';
-import { Models, PoolSnapshots, type Types } from '@ibt/db';
+import { Models, PoolSnapshots, Settlements, type Types } from '@ibt/db';
 import { PublicKey } from '@solana/web3.js';
 
 import type { KeeperCtx } from '../ctx.js';
@@ -53,7 +53,11 @@ export function createPoolPoller(ctx: KeeperCtx): PoolPoller {
     const status = await ctx.chain.signatureStatus(signature);
     if (status === 'landed') return false;
     if (status === 'failed') return true;
-    const lastValid = pendingMigrations.get(pool);
+    // A settlement run's migrate in flight is its stored pendingTx (G20).
+    const lastValid =
+      pendingMigrations.get(pool) ??
+      (await Settlements.findOne({ 'pendingTx.signature': signature }, { pendingTx: 1 }).lean())
+        ?.pendingTx?.lastValidBlockHeight;
     // Unknown signature: wait while its blockhash can still land. A resend after a
     // restart is safe because a second migrate on a migrated pool fails on-chain.
     return lastValid === undefined || (await ctx.blockHeight()) > lastValid;
@@ -61,10 +65,18 @@ export function createPoolPoller(ctx: KeeperCtx): PoolPoller {
 
   async function crankMigration(model: PolledModel, pool: string): Promise<void> {
     if (!(await shouldSendMigration(model, pool))) return;
+    let expected = model.token.migrationSignature ?? null;
     const { signature } = await ctx.chain.migrate(ctx.keeper, new PublicKey(pool), {
       onSigned: async (sig, lastValidBlockHeight) => {
+        // CAS on the signature judged dead, then this send's own (CHN-01 re-sign): one
+        // stored meanwhile (a settlement run's migrate) aborts the send before it leaves.
+        const { matchedCount } = await Models.updateOne(
+          { _id: model._id, 'token.migrationSignature': expected },
+          { $set: { 'token.migrationSignature': sig } },
+        );
+        if (matchedCount !== 1) throw new Error('migration signature changed; not sending');
         pendingMigrations.set(pool, lastValidBlockHeight);
-        await Models.updateOne({ _id: model._id }, { $set: { 'token.migrationSignature': sig } });
+        expected = sig;
       },
     });
     log.info({ model: model.slug, pool, signature }, 'migration sent');

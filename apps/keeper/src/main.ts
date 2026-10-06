@@ -1,5 +1,6 @@
 import './version-check.js';
 
+import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 
 import { connectDb, disconnectDb } from '@ibt/db';
@@ -7,7 +8,7 @@ import { solToLamports } from '@ibt/shared';
 import { createAlerter, createLogger, startSelfPing } from '@ibt/shared/node';
 
 import { loadEnv } from './env.js';
-import { createHealthServer } from './health-server.js';
+import { startHealthServer } from './health-server.js';
 import { FLOAT_MONITOR_CRON, createFloatMonitor } from './jobs/floatMonitor.js';
 import { HEALTH_CHECK_CRON, createHealthCheckJob } from './jobs/healthCheck.js';
 import { HOLD_EXPIRY_CRON, createHoldExpiryJob } from './jobs/holdExpiry.js';
@@ -18,6 +19,9 @@ import { createLease } from './lease.js';
 import { buildKeeperCtx } from './runtime.js';
 import { createScheduler } from './scheduler.js';
 import { createOrchestrator } from './settlement/orchestrator.js';
+
+/** How long shutdown waits for running jobs (a settlement step) before releasing the lease. */
+const SHUTDOWN_DRAIN_MS = 25_000;
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -69,7 +73,8 @@ async function main(): Promise<void> {
     await reconcile.tick();
   });
   const lease = createLease({
-    holder: `${hostname()}:${process.pid}`,
+    // Unique per process (KPR-17): containers often share pid 1 and a static hostname.
+    holder: `${hostname()}:${process.pid}:${randomUUID()}`,
     logger,
     onAcquired: () => {
       scheduler.start();
@@ -85,27 +90,45 @@ async function main(): Promise<void> {
     await orchestrator.run();
   });
 
-  const server = createHealthServer().listen(env.KEEPER_PORT, () => {
-    logger.info({ port: env.KEEPER_PORT }, 'keeper health server listening');
+  let stopping = false;
+  /**
+   * Stops triggers, lets running jobs finish (at most `SHUTDOWN_DRAIN_MS`) before the
+   * lease is released and the DB closed (KPR-14), and never rejects: any failure is
+   * logged and the process exits non-zero.
+   */
+  const shutdown = async (reason: string, code = 0): Promise<void> => {
+    if (stopping) return;
+    stopping = true;
+    let exitCode = code;
+    try {
+      logger.info({ reason }, 'keeper shutting down');
+      selfPing.stop();
+      scheduler.stop();
+      if (!(await scheduler.drain(SHUTDOWN_DRAIN_MS))) {
+        logger.warn({ ms: SHUTDOWN_DRAIN_MS }, 'jobs still running at shutdown; stopping anyway');
+      }
+      await lease.stop();
+      server.close();
+      await disconnectDb();
+    } catch (err) {
+      logger.error({ err }, 'keeper shutdown failed');
+      exitCode = 1;
+    }
+    process.exit(exitCode);
+  };
+
+  const server = startHealthServer(env.KEEPER_PORT, {
+    logger,
+    onError: () => void shutdown('health server error', 1),
   });
   const selfPing = startSelfPing({
     baseUrl: env.SELF_PING_URL ?? env.RENDER_EXTERNAL_URL,
     logger,
   });
-  await lease.start();
-
-  const shutdown = async (signal: string) => {
-    logger.info({ signal }, 'keeper shutting down');
-    selfPing.stop();
-    scheduler.stop();
-    await lease.stop();
-    server.close();
-    await disconnectDb();
-    process.exit(0);
-  };
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => void shutdown(signal));
   }
+  await lease.start();
 }
 
 main().catch((err: unknown) => {

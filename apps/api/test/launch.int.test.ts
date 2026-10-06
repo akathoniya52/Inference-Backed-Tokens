@@ -66,7 +66,7 @@ describe('token launch prepare + confirm', () => {
   }
 
   beforeAll(async () => {
-    t = await makeTestApp();
+    t = await makeTestApp({ env: { API_PUBLIC_URL: 'https://api.example.com/' } });
     const w = newWallet();
     ownerWallet = w.wallet;
     owner = await signIn(t.app, w.keypair);
@@ -82,8 +82,10 @@ describe('token launch prepare + confirm', () => {
     const first = randomKey();
     const res = await prepare({ modelId, mint: first, symbol: 'LLAMA' });
     expect(res.status).toBe(200);
+    // The exact URI confirm checks on chain, so the web never builds another one.
     expect(LaunchPrepareResponseSchema.parse(res.body)).toEqual({
       token: { status: 'pending', mint: first },
+      metadataUri: `https://api.example.com/metadata/${first}.json`,
     });
     expect((await Models.findById(modelId).lean())?.token).toMatchObject({
       status: 'pending',
@@ -171,9 +173,89 @@ describe('token launch prepare + confirm', () => {
       message: 'mint was not prepared for this model',
     });
 
+    // Once prepared, the chain decides: a mint without a valid launch is a mismatch...
     await prepare({ modelId, mint: randomKey() });
-    const different = await confirm({ modelId, mint, signature: randomSignature() });
-    expect(different.status).toBe(422);
+    const noLaunch = await confirm({ modelId, mint: randomKey(), signature: randomSignature() });
+    expect(noLaunch.status).toBe(422);
+    expect(errorOf(noLaunch)).toMatchObject({ code: 'pool_mismatch', reason: 'pool_not_found' });
+    // ...while the valid pool of an earlier prepared mint is listed, not orphaned (WEB-02).
+    const earlier = await confirm({ modelId, mint, signature: randomSignature() });
+    expect(earlier.status).toBe(200);
+    expect((await Models.findById(modelId).lean())?.token).toMatchObject({ status: 'curve', mint });
+  });
+
+  it('only an active model prepares a launch (API-07)', async () => {
+    const modelId = await createModel();
+    for (const status of ['paused', 'delisted']) {
+      await Models.updateOne({ _id: modelId }, { $set: { status } });
+      const res = await prepare({ modelId, mint: randomKey(), symbol: 'LLAMA' });
+      expect(res.status, status).toBe(403);
+    }
+    expect((await Models.findById(modelId).lean())?.token.status).toBe('none');
+  });
+
+  it('once the pending mint has a pool, prepare cannot replace it (API-07, WEB-02)', async () => {
+    const modelId = await createModel();
+    const mint = randomKey();
+    await prepare({ modelId, mint, symbol: 'LLAMA' });
+    addPool(mint);
+
+    const replace = await prepare({ modelId, mint: randomKey(), symbol: 'LLAMA' });
+    expect(replace.status).toBe(409);
+    expect(errorOf(replace).message).toContain('a pool already exists');
+    expect((await prepare({ modelId, mint, symbol: 'OTHER' })).status).toBe(409);
+    // Re-preparing the same mint and symbol stays idempotent.
+    expect((await prepare({ modelId, mint, symbol: 'LLAMA' })).status).toBe(200);
+
+    const signature = randomSignature();
+    const ok = await confirm({ modelId, mint, signature });
+    expect(ok.status).toBe(200);
+    // The same mint and signature again is still a 200 (idempotent confirm).
+    expect((await confirm({ modelId, mint, signature })).status).toBe(200);
+  });
+
+  it('a pending model whose mint has a foreign pool may still prepare another mint', async () => {
+    const modelId = await createModel();
+    const mint = randomKey();
+    await prepare({ modelId, mint });
+    addPool(mint, { creator: randomKey() });
+    expect((await prepare({ modelId, mint: randomKey() })).status).toBe(200);
+  });
+
+  it('checks the token name, symbol and metadata URI on chain (API-06)', async () => {
+    const modelId = await createModel();
+    const model = await Models.findById(modelId).lean();
+    const mint = randomKey();
+    await prepare({ modelId, mint, symbol: 'LLAMA' });
+    addPool(mint);
+    const good = {
+      name: model?.name ?? '',
+      symbol: 'LLAMA',
+      uri: `https://api.example.com/metadata/${mint}.json`,
+    };
+    const cases = [
+      [{ ...good, symbol: 'USDC' }, 'metadata_symbol'],
+      [{ ...good, name: 'Tether' }, 'metadata_name'],
+      [{ ...good, uri: `https://evil.example/metadata/${mint}.json` }, 'metadata_uri'],
+    ] as const;
+    const onChain = (fields: { name: string; symbol: string; uri: string }) => {
+      t.chain.setTokenMetadata(toPublicKey(mint), {
+        ...fields,
+        address: randomKey(),
+        updateAuthority: ownerWallet,
+        isMutable: false,
+      });
+    };
+    for (const [metadata, reason] of cases) {
+      onChain(metadata);
+      const res = await confirm({ modelId, mint, signature: randomSignature() });
+      expect(res.status, reason).toBe(422);
+      expect(errorOf(res)).toMatchObject({ code: 'pool_mismatch', reason });
+    }
+    onChain(good);
+    expect((await confirm({ modelId, mint, signature: randomSignature() })).status).toBe(200);
+    const input = t.chain.calls.filter((call) => call.method === 'verifyLaunch').at(-1)?.args[0];
+    expect(input).toMatchObject({ expectedMetadata: good });
   });
 
   it('non-owners get 403; unknown models 404; bad bodies 400; anonymous 401', async () => {

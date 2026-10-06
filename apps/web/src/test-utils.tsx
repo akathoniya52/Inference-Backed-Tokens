@@ -6,7 +6,7 @@ import type { ReactNode } from 'react';
 import { createMemoryRouter, RouterProvider, type RouteObject } from 'react-router-dom';
 
 import { QueryProvider } from './providers/QueryProvider';
-import { routes as appRoutes, routerFuture, routerProviderFuture } from './router';
+import { routes as appRoutes } from './router';
 
 export function createTestQueryClient(): QueryClient {
   return new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
@@ -38,13 +38,10 @@ interface RenderRouteOptions {
 
 /** Renders the app routes (or custom ones) at `path` inside a memory router. */
 export function renderRoute(path: string, options: RenderRouteOptions = {}): RenderResult {
-  const router = createMemoryRouter(options.routes ?? appRoutes, {
-    initialEntries: [path],
-    future: routerFuture,
-  });
+  const router = createMemoryRouter(options.routes ?? appRoutes, { initialEntries: [path] });
   return render(
     <TestProviders {...(options.queryClient ? { queryClient: options.queryClient } : {})}>
-      <RouterProvider router={router} future={routerProviderFuture} />
+      <RouterProvider router={router} />
     </TestProviders>,
   );
 }

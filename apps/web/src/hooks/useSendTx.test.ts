@@ -172,6 +172,35 @@ describe('useSendTx', () => {
     expect(signTransaction).not.toHaveBeenCalled();
   });
 
+  it('never shows raw simulation JSON for an unrecognised program error', async () => {
+    connection.simulateTransaction.mockResolvedValueOnce({
+      value: { err: { InstructionError: [1, { Custom: 6042 }] }, logs: ['Program log: odd'] },
+    });
+    const { result } = setup();
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.send({ build: () => Promise.resolve(transferTx()) });
+    });
+    expect(outcome).toMatchObject({ ok: false, error: { code: 'simulation_failed' } });
+    expect(result.current.error?.message).not.toMatch(/InstructionError|\{/);
+    expect(signTransaction).not.toHaveBeenCalled();
+  });
+
+  it('maps an on-chain failure without dumping its JSON and reports onSent first', async () => {
+    connection.confirmTransaction.mockResolvedValueOnce({
+      value: { err: { InstructionError: [0, { Custom: 6042 }] } },
+    });
+    const onSent = vi.fn();
+    const { result } = setup();
+    let outcome: unknown;
+    await act(async () => {
+      outcome = await result.current.send({ build: () => Promise.resolve(transferTx()), onSent });
+    });
+    expect(onSent).toHaveBeenCalledWith(SIG);
+    expect(outcome).toMatchObject({ ok: false, error: { code: 'transaction_failed' } });
+    expect(result.current.error?.message).not.toMatch(/InstructionError/);
+  });
+
   it('maps an expired blockhash during confirmation and keeps the signature', async () => {
     connection.confirmTransaction.mockRejectedValueOnce(
       new TransactionExpiredBlockheightExceededError(SIG),
@@ -223,11 +252,20 @@ describe('mapSendTxError', () => {
       'insufficient_sol',
     ],
     [new Error('Transfer: insufficient lamports 10, need 20'), 'insufficient_sol'],
-    [new Error('Simulation failed: "AccountNotFound"'), 'insufficient_sol'],
+    [new Error('Simulation failed: "AccountNotFound"'), 'account_not_found'],
+    [new Error('Program log: Error: insufficient funds'), 'insufficient_funds'],
+    [new Error('Simulation failed: {"InstructionError":[2,{"Custom":1}]}'), 'insufficient_funds'],
+    [new Error('custom program error: 0x1'), 'insufficient_funds'],
     [new Error('Blockhash not found'), 'blockhash_expired'],
     [new Error('something odd'), 'unknown'],
   ])('maps %s', (error, code) => {
     expect(mapSendTxError(error).code).toBe(code);
+  });
+
+  it('never shows AccountNotFound as a SOL shortfall', () => {
+    expect(mapSendTxError(new Error('Simulation failed: "AccountNotFound"')).message).not.toMatch(
+      /Not enough SOL/,
+    );
   });
 
   it('passes API error messages through', () => {

@@ -80,6 +80,30 @@ describe('createTelegramAlerter', () => {
     expect(logged).toMatchObject({ level: 50, alert: true, lamports: 42 });
   });
 
+  it('sends bigint and Error body fields instead of rejecting, with URLs scrubbed (DB-06)', async () => {
+    const { logger } = capture();
+    const { fetch, calls } = stubFetch(ok);
+    const alerter = createTelegramAlerter({
+      botToken: FAKE_BOT_TOKEN,
+      chatId: CHAT_ID,
+      logger,
+      fetch,
+    });
+
+    await expect(
+      alerter.alert('error', 'settlement failed', {
+        lamports: 2n ** 64n,
+        err: new TypeError('RPC down: https://rpc.test/?api-key=k3y'),
+      }),
+    ).resolves.toBeUndefined();
+
+    const { text } = sentBody(calls[0]);
+    expect(text).toContain('"lamports": "18446744073709551616"');
+    expect(text).toContain('"name": "TypeError"');
+    expect(text).toContain('RPC down: https://rpc.test/?***');
+    expect(text).not.toContain('k3y');
+  });
+
   it('uses apiBase when given', async () => {
     const { logger } = capture();
     const { fetch, calls } = stubFetch(ok);

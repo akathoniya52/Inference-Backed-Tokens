@@ -8,20 +8,25 @@ import type {
   AddAndLockInput,
   AddAndLockResult,
   ChainClient,
-  ExpiredSignatureState,
+  CurveBuyResult,
+  DammSwapResult,
   PoolQuote,
   PoolQuoteInput,
   PositionKeys,
   SendOpts,
   SignatureState,
+  SwapFillRef,
   TxResult,
 } from '../client.js';
 import { deriveDammPool, type DammPoolDto } from '../damm.js';
 import { curveProgress, dbcPoolAddress, type DbcPoolDto, type PoolRef } from '../dbc.js';
 import { type DepositResult, parseDeposit } from '../deposit.js';
+import type { SwapFill } from '../fill.js';
+import type { TokenMetadata } from '../metadata.js';
 import { FakePriceSource, type PriceSource } from '../price.js';
 import { NATIVE_MINT, USDC_MINT } from '../sdk.js';
 import type { VerifyLaunchInput } from '../dbc.js';
+import type { ExpiredSignatureState } from '../send.js';
 
 export interface FakeChainTx {
   signature: string;
@@ -163,6 +168,8 @@ export class FakeChain implements ChainClient {
   private readonly pools = new Map<string, FakePool>();
   private readonly balances = new Map<string, bigint>();
   private readonly parsedTxs = new Map<string, ParsedTransactionWithMeta>();
+  private readonly fills = new Map<string, SwapFill>();
+  private readonly metadata = new Map<string, TokenMetadata>();
   private readonly failures = new Map<string, number>();
   private readonly crashBeforeLand = new Set<string>();
   private readonly crashAfterLanding = new Set<string>();
@@ -222,6 +229,11 @@ export class FakeChain implements ChainClient {
 
   setParsedTx(signature: string, tx: ParsedTransactionWithMeta): void {
     this.parsedTxs.set(signature, tx);
+  }
+
+  /** Metadata `tokenMetadata` returns; `verifyLaunch` checks `expectedMetadata` only for mints set here. */
+  setTokenMetadata(mint: PublicKey, metadata: TokenMetadata): void {
+    this.metadata.set(mint.toBase58(), metadata);
   }
 
   /** The next `n` calls of `method` throw `chain_send_failed` before signing. */
@@ -293,7 +305,27 @@ export class FakeChain implements ChainClient {
     if (reason || !pool) {
       throw new AppError('pool_mismatch', { details: { reason: reason ?? 'pool_not_found' } });
     }
+    const metadata = this.metadata.get(input.mint.toBase58());
+    const want = input.expectedMetadata;
+    const metadataReason =
+      !want || !metadata
+        ? null
+        : want.name !== undefined && metadata.name !== want.name
+          ? 'metadata_name'
+          : want.symbol !== undefined && metadata.symbol !== want.symbol
+            ? 'metadata_symbol'
+            : want.uri !== undefined && metadata.uri !== want.uri
+              ? 'metadata_uri'
+              : null;
+    if (metadataReason) {
+      throw new AppError('pool_mismatch', { details: { reason: metadataReason } });
+    }
     return { pool: pool.address.toBase58() };
+  }
+
+  tokenMetadata(mint: PublicKey): Promise<TokenMetadata | null> {
+    this.record('tokenMetadata', [mint]);
+    return Promise.resolve(this.metadata.get(mint.toBase58()) ?? null);
   }
 
   async readPool(ref: PoolRef): Promise<DbcPoolDto | null> {
@@ -378,7 +410,7 @@ export class FakeChain implements ChainClient {
     poolAddress: PublicKey,
     lamports: bigint,
     opts?: SendOpts & { slippageBps?: number },
-  ): Promise<TxResult & { outAmount: bigint }> {
+  ): Promise<CurveBuyResult> {
     this.record('curveBuy', [keeper.publicKey, poolAddress, lamports, opts]);
     await this.hydrate();
     const pool = this.requirePool({ pool: poolAddress });
@@ -399,7 +431,8 @@ export class FakeChain implements ChainClient {
         this.move(keeper.publicKey, pool.mint, outAmount);
       },
     });
-    return { signature, outAmount };
+    this.fills.set(signature, { amountIn: spent, amountOut: outAmount });
+    return { signature, outAmount, lamportsSpent: spent };
   }
 
   async migrate(keeper: Signer, poolAddress: PublicKey, opts?: SendOpts): Promise<TxResult> {
@@ -425,7 +458,7 @@ export class FakeChain implements ChainClient {
     mint: PublicKey,
     swap: { inputMint: PublicKey; amountIn: bigint; slippageBps?: number },
     opts?: SendOpts,
-  ): Promise<TxResult & { outAmount: bigint }> {
+  ): Promise<DammSwapResult> {
     this.record('dammSwap', [keeper.publicKey, mint, swap, opts]);
     await this.hydrate();
     this.requireDamm(mint);
@@ -443,7 +476,23 @@ export class FakeChain implements ChainClient {
         this.move(keeper.publicKey, solIn ? mint : SOL, outAmount);
       },
     });
-    return { signature, outAmount };
+    this.fills.set(signature, { amountIn: swap.amountIn, amountOut: outAmount });
+    return { signature, outAmount, amountIn: swap.amountIn };
+  }
+
+  /** Fills of swaps this instance landed; anything else rejects like an unreadable tx. */
+  swapFill(signature: string, ref: SwapFillRef): Promise<SwapFill> {
+    this.record('swapFill', [signature, ref]);
+    const fill = this.fills.get(signature);
+    if (!fill) {
+      return Promise.reject(
+        new AppError('chain_send_failed', {
+          message: 'landed swap moved no tokens',
+          details: { signature, landed: true },
+        }),
+      );
+    }
+    return Promise.resolve(fill);
   }
 
   async addAndLock(

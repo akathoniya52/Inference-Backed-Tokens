@@ -32,6 +32,7 @@ for (const [network, prefix] of [
 }
 for (const [network, prefix] of [
   ['::', 96], // unspecified, loopback and IPv4-compatible
+  ['::ffff:0:0:0', 96], // SIIT IPv4-translated (`::ffff:0:a.b.c.d`)
   ['64:ff9b::', 96], // NAT64
   ['64:ff9b:1::', 48],
   ['100::', 64], // discard

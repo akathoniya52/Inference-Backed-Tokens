@@ -20,7 +20,8 @@ export interface FloatMonitor {
 
 /**
  * The next run's payouts: per model, the provider share of unsettled billable revenue
- * plus its carry-over, counted only when it reaches the minimum and capped per run (G18).
+ * plus its carry-over, counted only when it reaches the minimum and capped per model, and
+ * the total capped at what one run may pay (G18).
  */
 export async function expectedPayoutMicro(ctx: Pick<KeeperCtx, 'config'>): Promise<bigint> {
   const pending = await Requests.aggregate<{ _id: Types.ObjectId; total: bigint | number }>([
@@ -28,8 +29,9 @@ export async function expectedPayoutMicro(ctx: Pick<KeeperCtx, 'config'>): Promi
     { $group: { _id: '$modelId', total: { $sum: '$costMicroUsdc' } } },
   ]);
   const revenue = new Map(pending.map((row) => [row._id.toHexString(), toBigInt(row.total)]));
+  // Delisted models with unsettled revenue are still settled and paid (KPR-09).
   const models = await Models.find(
-    { status: { $ne: 'delisted' } },
+    { $or: [{ status: { $ne: 'delisted' } }, { _id: { $in: pending.map((row) => row._id) } }] },
     { splits: 1, 'token.status': 1, 'token.carryOverMicroUsdc': 1 },
   ).lean();
   const { minPayoutMicroUsdc, maxPayoutMicroUsdc } = ctx.config;
@@ -41,7 +43,8 @@ export async function expectedPayoutMicro(ctx: Pick<KeeperCtx, 'config'>): Promi
     if (accrued < minPayoutMicroUsdc) continue;
     expected += accrued > maxPayoutMicroUsdc ? maxPayoutMicroUsdc : accrued;
   }
-  return expected;
+  // One run pays at most MAX_PAYOUT_USDC_PER_RUN across all models (KPR-13).
+  return expected > maxPayoutMicroUsdc ? maxPayoutMicroUsdc : expected;
 }
 
 /** Alerts when the keeper SOL float is below `FLOAT_MIN_SOL` or the treasury cannot cover the next payouts (L251, L530). */

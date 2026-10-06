@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { parseArgs } from 'node:util';
 
@@ -9,21 +10,26 @@ import { loadEnv } from '../env.js';
 import { createLease } from '../lease.js';
 import { buildKeeperCtx, type ChainMode } from '../runtime.js';
 import { createOrchestrator } from '../settlement/orchestrator.js';
-import { periodFromStart, settlementPeriod, type SettlementPeriod } from '../settlement/period.js';
+import { parsePeriodStart, settlementPeriod, type SettlementPeriod } from '../settlement/period.js';
 import { SETTLEMENT_STEPS, type NamedStep } from '../settlement/steps.js';
 import { outcomeSummary } from '../settlement/summary.js';
 
 function parseCli(argv: string[]): { chain: ChainMode; period: SettlementPeriod } {
   const { values } = parseArgs({
     args: argv,
-    options: { chain: { type: 'string', default: 'fake' }, 'period-start': { type: 'string' } },
+    options: {
+      chain: { type: 'string', default: 'fake' },
+      'period-start': { type: 'string' },
+      force: { type: 'boolean', default: false },
+    },
     allowPositionals: true,
   });
   if (values.chain !== 'fake' && values.chain !== 'real') {
     throw new Error('--chain must be fake or real');
   }
   const raw = values['period-start'];
-  const period = raw ? periodFromStart(new Date(raw)) : settlementPeriod(new Date());
+  const now = new Date();
+  const period = raw ? parsePeriodStart(raw, now, { force: values.force }) : settlementPeriod(now);
   return { chain: values.chain, period };
 }
 
@@ -58,7 +64,7 @@ async function main(): Promise<void> {
     // Holding the keeper lease keeps a running keeper from driving the same settlements;
     // it is renewed for the whole run, and the run stops at its next send once it is lost.
     const lease = createLease({
-      holder: `settle-once:${hostname()}:${process.pid}`,
+      holder: `settle-once:${hostname()}:${process.pid}:${randomUUID()}`,
       logger,
     });
     await lease.start();

@@ -22,12 +22,35 @@ const requestSchema = new Schema(
     streamed: { type: Boolean, required: true, default: false },
     upstreamStatus: { type: Number, default: null },
     settlementId: { type: Schema.Types.ObjectId, ref: 'Settlement', default: null },
+    /** UTC day whose `dailySpend` row the hold reserved against; `null` for uncapped holds. */
+    dailyCapDay: { type: Date, default: null },
   },
   { collection: 'requests', timestamps: { createdAt: true, updatedAt: false }, autoIndex: false },
 );
 
 requestSchema.index({ requestId: 1 }, { unique: true });
-requestSchema.index({ createdAt: 1 }, { expireAfterSeconds: REQUEST_TTL_S });
+/**
+ * TTL (KPR-09): only rows no settlement still needs expire, i.e. settled ones and unbilled
+ * ones (cost 0, never tagged). A billed request is kept until a settlement tags it. Named
+ * apart from the old unfiltered `createdAt_1` TTL, which `createAllIndexes()` drops as a
+ * legacy index and `syncIndexes()` drops as undeclared.
+ */
+requestSchema.index(
+  { createdAt: 1 },
+  {
+    name: 'createdAt_ttl_settled',
+    expireAfterSeconds: REQUEST_TTL_S,
+    partialFilterExpression: { settlementId: { $type: 'objectId' } },
+  },
+);
+requestSchema.index(
+  { createdAt: 1 },
+  {
+    name: 'createdAt_ttl_unbilled',
+    expireAfterSeconds: REQUEST_TTL_S,
+    partialFilterExpression: { costMicroUsdc: { $lte: 0 } },
+  },
+);
 requestSchema.index({ modelId: 1, settlementId: 1, createdAt: 1 });
 requestSchema.index({ userId: 1, createdAt: 1 });
 requestSchema.index(

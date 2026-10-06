@@ -39,14 +39,29 @@ function defaultDailyCap(ctx: AppContext): bigint {
     : usdcStringToMicro(ctx.env.DAILY_CAP_USDC);
 }
 
+/** GW-08: active keys one user may hold; revoke one to create another. */
+export const MAX_ACTIVE_KEYS_PER_USER = 20;
+
+function tooManyKeys(): AppError {
+  return new AppError('forbidden', {
+    message: `at most ${MAX_ACTIVE_KEYS_PER_USER} active API keys; revoke one first`,
+  });
+}
+
 export async function createKey(
   ctx: AppContext,
   userId: string,
   input: CreateApiKeyRequest,
 ): Promise<CreateApiKeyResponse> {
+  const owner = new Types.ObjectId(userId);
+  if (
+    (await ApiKeys.countDocuments({ userId: owner, status: 'active' })) >= MAX_ACTIVE_KEYS_PER_USER
+  ) {
+    throw tooManyKeys();
+  }
   const key = generateApiKey();
   const doc = await ApiKeys.create({
-    userId: new Types.ObjectId(userId),
+    userId: owner,
     keyHash: sha256Hex(key),
     prefix: keyPrefix(key),
     name: input.name,
@@ -55,6 +70,13 @@ export async function createKey(
         ? defaultDailyCap(ctx)
         : usdcStringToMicro(input.dailyCapUsdc),
   });
+  // Concurrent creates can all pass the count above; recounting after the insert
+  // keeps the cap: each one over it drops its own key (a race may drop both).
+  const active = await ApiKeys.countDocuments({ userId: owner, status: 'active' });
+  if (active > MAX_ACTIVE_KEYS_PER_USER) {
+    await ApiKeys.deleteOne({ _id: doc._id });
+    throw tooManyKeys();
+  }
   return { ...toDto(doc.toObject()), key };
 }
 

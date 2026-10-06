@@ -2,6 +2,7 @@ import type { Logger } from 'pino';
 import { fetch as undiciFetch } from 'undici';
 
 import { createLogAlerter, type Alerter, type AlertLevel } from './alerter.js';
+import { redactSecrets } from './logger.js';
 
 export const TELEGRAM_API_BASE = 'https://api.telegram.org';
 /** Telegram rejects messages over 4096 chars; the body is capped well below that. */
@@ -35,6 +36,13 @@ export interface CreateAlerterOptions {
   fetch?: TelegramFetch;
 }
 
+/** `JSON.stringify` replacer: bigint as a decimal string, `Error` as its name and message. */
+export function alertJsonReplacer(_key: string, value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (value instanceof Error) return { name: value.name, message: value.message };
+  return value;
+}
+
 export function formatTelegramText(
   level: AlertLevel,
   title: string,
@@ -42,9 +50,10 @@ export function formatTelegramText(
 ): string {
   const header = `[${level.toUpperCase()}] ${title}`;
   if (Object.keys(body).length === 0) return header;
-  const json = JSON.stringify(body, null, 2);
+  const json = JSON.stringify(body, alertJsonReplacer, 2);
+  const safe = redactSecrets(json);
   const capped =
-    json.length > TELEGRAM_BODY_LIMIT ? `${json.slice(0, TELEGRAM_BODY_LIMIT)}…` : json;
+    safe.length > TELEGRAM_BODY_LIMIT ? `${safe.slice(0, TELEGRAM_BODY_LIMIT)}…` : safe;
   return `${header}\n${capped}`;
 }
 
@@ -60,8 +69,9 @@ export function createTelegramAlerter({
   const url = `${apiBase}/bot${botToken}/sendMessage`;
   const scrub = (message: string): string => message.split(botToken).join('***');
 
-  async function send(text: string): Promise<void> {
+  async function send(format: () => string): Promise<void> {
     try {
+      const text = format();
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -91,7 +101,7 @@ export function createTelegramAlerter({
   return {
     async alert(level, title, body = {}) {
       await logAlerter.alert(level, title, body);
-      await send(formatTelegramText(level, title, body));
+      await send(() => formatTelegramText(level, title, body));
     },
   };
 }

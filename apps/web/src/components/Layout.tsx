@@ -1,5 +1,5 @@
 import { WalletMultiButton } from '@solana/wallet-adapter-react-ui';
-import { Link, NavLink, Outlet } from 'react-router-dom';
+import { Link, NavLink, Outlet, ScrollRestoration } from 'react-router-dom';
 
 const NAV_ITEMS = [
   { to: '/', label: 'Explore', end: true },
@@ -40,6 +40,7 @@ export function Layout() {
       <main className="mx-auto w-full max-w-shell flex-1 px-4 py-12 sm:px-6">
         <Outlet />
       </main>
+      <ScrollRestoration />
     </div>
   );
 }

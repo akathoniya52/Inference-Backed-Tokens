@@ -20,7 +20,6 @@ import {
   emptySettlements,
   graduatedTokenState,
 } from '../fixtures/tokens';
-import { routerFuture, routerProviderFuture } from '../router';
 import { renderRoute, TestProviders } from '../test-utils';
 import { TokenPage } from './TokenPage';
 
@@ -132,11 +131,11 @@ describe('TokenPage', () => {
           ),
         },
       ],
-      { initialEntries: [`/t/${curveModel.slug}`], future: routerFuture },
+      { initialEntries: [`/t/${curveModel.slug}`] },
     );
     render(
       <TestProviders>
-        <RouterProvider router={router} future={routerProviderFuture} />
+        <RouterProvider router={router} />
       </TestProviders>,
     );
     await waitFor(() => {

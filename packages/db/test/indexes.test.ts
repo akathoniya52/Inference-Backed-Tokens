@@ -17,11 +17,13 @@ import {
   Settlements,
   Users,
   connectDb,
+  createAllIndexes,
   disconnectDb,
   syncAllIndexes,
 } from '../src/index.js';
 
 interface IndexInfo {
+  name?: string;
   key: Record<string, number>;
   unique?: boolean;
   sparse?: boolean;
@@ -34,6 +36,8 @@ type IndexedModel = (typeof ALL_MODELS)[number];
 interface Expected {
   model: IndexedModel;
   key: Record<string, number>;
+  /** Needed when several indexes share `key`. */
+  name?: string;
   unique?: true;
   ttlSeconds?: number;
   partial?: Record<string, unknown>;
@@ -55,7 +59,20 @@ const EXPECTED: readonly Expected[] = [
   },
   { model: Models, key: { providerId: 1 } },
   { model: Requests, key: { requestId: 1 }, unique: true },
-  { model: Requests, key: { createdAt: 1 }, ttlSeconds: 90 * DAY_S },
+  {
+    model: Requests,
+    key: { createdAt: 1 },
+    name: 'createdAt_ttl_settled',
+    ttlSeconds: 90 * DAY_S,
+    partial: { settlementId: { $type: 'objectId' } },
+  },
+  {
+    model: Requests,
+    key: { createdAt: 1 },
+    name: 'createdAt_ttl_unbilled',
+    ttlSeconds: 90 * DAY_S,
+    partial: { costMicroUsdc: { $lte: 0 } },
+  },
   { model: Requests, key: { modelId: 1, settlementId: 1, createdAt: 1 } },
   { model: Requests, key: { userId: 1, createdAt: 1 } },
   {
@@ -70,6 +87,14 @@ const EXPECTED: readonly Expected[] = [
     key: { 'ref.requestId': 1 },
     unique: true,
     partial: { type: 'hold', 'ref.requestId': { $type: 'string' } },
+  },
+  { model: Ledger, key: { 'ref.holdId': 1 }, unique: true, partial: { type: 'capture' } },
+  { model: Ledger, key: { 'ref.txSignature': 1 }, unique: true, partial: { type: 'deposit' } },
+  {
+    model: Ledger,
+    key: { 'ref.settlementId': 1 },
+    unique: true,
+    partial: { type: 'adjust', 'ref.settlementId': { $type: 'objectId' } },
   },
   { model: DailySpend, key: { apiKeyId: 1, day: 1 }, unique: true },
   { model: DailySpend, key: { expiresAt: 1 }, ttlSeconds: 0 },
@@ -111,9 +136,14 @@ describe('syncAllIndexes', () => {
   });
 
   it.each(
-    EXPECTED.map((e) => [`${e.model.collection.collectionName} ${JSON.stringify(e.key)}`, e]),
+    EXPECTED.map((e) => [
+      `${e.model.collection.collectionName} ${JSON.stringify(e.key)}${e.name ? ` ${e.name}` : ''}`,
+      e,
+    ]),
   )('%s', async (_name, expected) => {
-    const found = (await indexesOf(expected.model)).find((ix) => sameKey(ix.key, expected.key));
+    const found = (await indexesOf(expected.model)).find(
+      (ix) => sameKey(ix.key, expected.key) && (!expected.name || ix.name === expected.name),
+    );
     expect(found, 'index exists').toBeDefined();
     expect(found?.unique).toBe(expected.unique);
     expect(found?.sparse).toBeUndefined();
@@ -153,6 +183,20 @@ describe('syncAllIndexes', () => {
     expect(stored.upstream.supportsStreamUsage).toBe(false);
     expect(stored.token.pendingCompoundLamports).toBe(0n);
     await Models.deleteMany({});
+  });
+
+  it('createAllIndexes drops the legacy unfiltered requests TTL and keeps the rest (KPR-09)', async () => {
+    await Requests.collection.createIndex(
+      { createdAt: 1 },
+      { name: 'createdAt_1', expireAfterSeconds: 90 * DAY_S },
+    );
+    await createAllIndexes();
+    const names = (await indexesOf(Requests)).map((ix) => ix.name);
+    expect(names).not.toContain('createdAt_1');
+    expect(names).toEqual(
+      expect.arrayContaining(['createdAt_ttl_settled', 'createdAt_ttl_unbilled']),
+    );
+    await expect(createAllIndexes()).resolves.toBeUndefined();
   });
 
   it('round-trips money as bigint in hydrated and lean reads', async () => {

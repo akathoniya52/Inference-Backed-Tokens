@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { Ledger, Models, Settlements, Users, hold, type Types } from '@ibt/db';
+import { Ledger, Models, Requests, Settlements, Types, Users, hold, markCaptureDue } from '@ibt/db';
 import { lamportsToSol } from '@ibt/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
@@ -154,6 +154,80 @@ describe('periodic keeper jobs', () => {
       expect((await Users.findById(user._id).lean())?.heldMicroUsdc).toBe(0n);
       expect((await Ledger.findById(holdId).lean())?.status).toBe('expired');
       expect(await job.tick()).toBe(0);
+    });
+
+    it('captures an expired hold with a due capture instead of releasing it (GW-12)', async () => {
+      const user = await Users.create({
+        wallet: 'HoldWallet2222222222222222222222222222222222',
+        role: 'consumer',
+        depositRef: 'HOLDEXP2',
+        balanceMicroUsdc: micro(5),
+      });
+      const { holdId } = await hold(user._id, micro(2), {
+        requestId: 'hold-due-1',
+        expiresInMs: 1_000,
+      });
+      const record = {
+        requestId: 'hold-due-1',
+        apiKeyId: new Types.ObjectId(),
+        modelId: new Types.ObjectId(),
+        status: 'success' as const,
+        promptTokens: 10,
+        completionTokens: 20,
+        latencyMs: 5,
+        streamed: true,
+      };
+      // Never more than the hold reserved.
+      expect(await markCaptureDue(holdId, micro(3), record)).toBe(false);
+      expect(await markCaptureDue(holdId, micro(1), record)).toBe(true);
+
+      const job = createHoldExpiryJob(ctx);
+      ctx.clock.set(new Date(Date.now() + HOUR));
+      expect(await job.tick()).toBe(1);
+      expect(await Ledger.findById(holdId).lean()).toMatchObject({ status: 'captured' });
+      expect(await Users.findById(user._id).lean()).toMatchObject({
+        balanceMicroUsdc: micro(4),
+        heldMicroUsdc: 0n,
+      });
+      expect(await Requests.findOne({ requestId: 'hold-due-1' }).lean()).toMatchObject({
+        costMicroUsdc: micro(1),
+        modelId: record.modelId,
+      });
+      expect(await job.tick()).toBe(0);
+      expect(await Ledger.countDocuments({ type: 'capture', 'ref.holdId': holdId })).toBe(1);
+    });
+
+    it('alerts and keeps a due hold open when its capture fails', async () => {
+      const user = await Users.create({
+        wallet: 'HoldWallet3333333333333333333333333333333333',
+        role: 'consumer',
+        depositRef: 'HOLDEXP3',
+        balanceMicroUsdc: micro(5),
+      });
+      const { holdId } = await hold(user._id, micro(2), {
+        requestId: 'hold-due-2',
+        expiresInMs: 1_000,
+      });
+      await markCaptureDue(holdId, micro(1), {
+        requestId: 'hold-due-2',
+        apiKeyId: new Types.ObjectId(),
+        modelId: new Types.ObjectId(),
+        status: 'success',
+        promptTokens: 1,
+        completionTokens: 1,
+        latencyMs: 1,
+        streamed: true,
+      });
+      await Users.deleteOne({ _id: user._id });
+
+      const job = createHoldExpiryJob(ctx);
+      ctx.clock.set(new Date(Date.now() + HOUR));
+      expect(await job.tick()).toBe(0);
+      expect((await Ledger.findById(holdId).lean())?.status).toBe('open');
+      expect(ctx.alerter.alerts.map((alert) => alert.title)).toContain(
+        'due capture of an expired hold failed',
+      );
+      await Ledger.deleteOne({ _id: holdId });
     });
   });
 

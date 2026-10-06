@@ -10,3 +10,5 @@ export * from './damm.js';
 export * from './spl.js';
 export * from './price.js';
 export * from './client.js';
+export * from './fill.js';
+export * from './metadata.js';

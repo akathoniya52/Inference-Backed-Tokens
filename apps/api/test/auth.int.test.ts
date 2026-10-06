@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { requireAuthUser } from '../src/context.js';
 import { base58Encode } from '../src/lib/base58.js';
 import { jwtAuth } from '../src/middleware/jwtAuth.js';
+import { NONCE_LIMIT_PER_MIN } from '../src/modules/auth/router.js';
 import {
   errorOf,
   makeTestApp,
@@ -25,7 +26,7 @@ import {
 } from './helpers.js';
 
 let ipCounter = 0;
-/** Each test gets its own client IP so the 10/min auth limit only bites where intended. */
+/** Each test gets its own client IP so the per-IP auth limits only bite where intended. */
 const nextIp = () => `198.51.100.${++ipCounter}`;
 
 const sessionRoute: MakeTestAppOptions['extraRoutes'] = (app, ctx) => {
@@ -225,10 +226,10 @@ describe('auth', () => {
     }
   });
 
-  it('rate limits auth routes to 10/min per IP', async () => {
+  it('rate limits nonce per IP, in a bucket of its own (API-10)', async () => {
     const { wallet } = newWallet();
     const ip = nextIp();
-    for (let i = 0; i < 10; i += 1) await nonce(wallet, ip);
+    for (let i = 0; i < NONCE_LIMIT_PER_MIN; i += 1) await nonce(wallet, ip);
     const limited = await request(t.app)
       .post('/api/auth/nonce')
       .set('X-Forwarded-For', ip)
@@ -237,6 +238,14 @@ describe('auth', () => {
     expect(errorOf(limited).code).toBe('rate_limited');
     // Another client IP is unaffected.
     await nonce(wallet, nextIp());
+    // Verify and logout keep their own buckets on the exhausted IP.
+    const verify = await request(t.app)
+      .post('/api/auth/verify')
+      .set('X-Forwarded-For', ip)
+      .send({});
+    expect(verify.status).toBe(400);
+    const logout = await request(t.app).post('/api/auth/logout').set('X-Forwarded-For', ip);
+    expect(logout.status).toBe(401);
   });
 
   it('jwtAuth accepts the token and rejects tampered, foreign or expired tokens', async () => {

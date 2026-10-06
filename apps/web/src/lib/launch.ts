@@ -3,8 +3,29 @@ import { PublicKey, type Connection, type Keypair, type Transaction } from '@sol
 
 import { env } from '../env';
 
-export function metadataUri(mint: PublicKey): string {
-  return `${env.VITE_API_URL.replace(/\/+$/, '')}/metadata/${mint.toBase58()}.json`;
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/**
+ * The token's metadata URI: the one `/launch/prepare` returned, which is what
+ * confirm checks on chain (API-06), else one built from `VITE_API_URL`. A
+ * returned URI must be this mint's `/metadata/<mint>.json` over https (http
+ * only on localhost); anything else is refused before the wallet signs.
+ */
+export function metadataUri(mint: PublicKey, fromApi?: string): string {
+  const path = `/metadata/${mint.toBase58()}.json`;
+  if (fromApi === undefined) return `${env.VITE_API_URL.replace(/\/+$/, '')}${path}`;
+  let url: URL | null = null;
+  try {
+    url = new URL(fromApi);
+  } catch {
+    // Refused below.
+  }
+  const secure =
+    url?.protocol === 'https:' || (url?.protocol === 'http:' && LOCAL_HOSTS.has(url.hostname));
+  if (!url || !secure || !url.pathname.endsWith(path) || url.search !== '' || url.hash !== '') {
+    throw new Error('the api returned an unexpected token metadata URI');
+  }
+  return fromApi;
 }
 
 export interface LaunchTxInput {
@@ -14,6 +35,8 @@ export interface LaunchTxInput {
   name: string;
   symbol: string;
   blockhash: string;
+  /** `metadataUri` from `/launch/prepare`. */
+  apiMetadataUri?: string;
 }
 
 /**
@@ -27,12 +50,14 @@ export async function buildLaunchTransaction({
   name,
   symbol,
   blockhash,
+  apiMetadataUri,
 }: LaunchTxInput): Promise<Transaction> {
+  const uri = metadataUri(mint.publicKey, apiMetadataUri);
   const client = new DynamicBondingCurveClient(connection, 'confirmed');
   const tx = await client.creator.createPool({
     name,
     symbol,
-    uri: metadataUri(mint.publicKey),
+    uri,
     payer: creator,
     poolCreator: creator,
     config: new PublicKey(env.VITE_DBC_CONFIG),

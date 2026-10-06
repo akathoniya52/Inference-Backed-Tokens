@@ -19,19 +19,64 @@ import {
 import bs58 from 'bs58';
 
 export const DEFAULT_SEND_ATTEMPTS = 3;
+/** Finalized-status checks after a blockhash expiry before giving up (`chain_send_failed`). */
+export const DEFAULT_EXPIRY_CHECKS = 5;
+/** Wait between those checks; finalization trails the tip by ~32 slots (~13 s). */
+export const DEFAULT_EXPIRY_CHECK_MS = 4000;
+
+/** Blocks a blockhash stays valid for (web3.js `lastValidBlockHeight` = its height + 150). */
+export const BLOCKHASH_VALIDITY_BLOCKS = 150;
+
+/**
+ * Final status of a tx whose blockhash expired: `absent` means the node's history covers
+ * the tx's whole validity window and has no record of it; `unknown` means it cannot tell
+ * (expiry not finalized yet, status not finalized, or history pruned), so never resend.
+ */
+export type ExpiredSignatureState = 'landed' | 'failed' | 'absent' | 'unknown';
+
+/** The reads `expiredSignatureStatus` needs, all answered by one node; `Connection` satisfies it. */
+export interface ExpiryConnection {
+  getBlockHeight(commitment?: Commitment): Promise<number>;
+  getSignatureStatuses(
+    signatures: string[],
+    config?: SignatureStatusConfig,
+  ): Promise<RpcResponseAndContext<(SignatureStatus | null)[]>>;
+  getMinimumLedgerSlot(): Promise<number>;
+}
+
+/**
+ * Re-check for a tx past `lastValidBlockHeight`, against finalized state and full history.
+ * Pass a single node (not a load-balanced pool) so the ledger range and the status agree.
+ * A tx valid until `lastValidBlockHeight` can only land in a slot above
+ * `lastValidBlockHeight - 150` (a slot is never below its block height), so a node whose
+ * ledger starts at or before that slot would have it if it landed.
+ */
+export async function expiredSignatureStatus(
+  conn: ExpiryConnection,
+  signature: string,
+  lastValidBlockHeight: number,
+): Promise<ExpiredSignatureState> {
+  if ((await conn.getBlockHeight('finalized')) <= lastValidBlockHeight) return 'unknown';
+  const { value } = await conn.getSignatureStatuses([signature], {
+    searchTransactionHistory: true,
+  });
+  const status = value[0];
+  if (status) {
+    if (status.confirmationStatus !== 'finalized') return 'unknown';
+    return status.err === null ? 'landed' : 'failed';
+  }
+  const firstSlot = await conn.getMinimumLedgerSlot();
+  return firstSlot <= lastValidBlockHeight - 2 * BLOCKHASH_VALIDITY_BLOCKS ? 'absent' : 'unknown';
+}
 
 /** The slice of `Connection` that `sendAndConfirm` needs; `Connection` satisfies it. */
-export interface SendConnection {
+export interface SendConnection extends ExpiryConnection {
   getLatestBlockhash(commitment?: Commitment): Promise<BlockhashWithExpiryBlockHeight>;
   sendRawTransaction(raw: Buffer | Uint8Array | number[], options?: SendOptions): Promise<string>;
   confirmTransaction(
     strategy: BlockheightBasedTransactionConfirmationStrategy,
     commitment?: Commitment,
   ): Promise<RpcResponseAndContext<SignatureResult>>;
-  getSignatureStatuses(
-    signatures: string[],
-    config?: SignatureStatusConfig,
-  ): Promise<RpcResponseAndContext<(SignatureStatus | null)[]>>;
   simulateTransaction(
     tx: VersionedTransaction,
     config?: SimulateTransactionConfig,
@@ -53,6 +98,10 @@ interface SendBase {
   simulate?: boolean;
   maxAttempts?: number;
   commitment: Commitment;
+  /** Finalized-status checks after a blockhash expiry (default `DEFAULT_EXPIRY_CHECKS`). */
+  expiryChecks?: number;
+  /** Wait between those checks (default `DEFAULT_EXPIRY_CHECK_MS`). */
+  expiryCheckMs?: number;
 }
 
 export type SendAndConfirmInput = SendBase &
@@ -89,17 +138,39 @@ function signTx(
   return { signature: bs58.encode(first), raw: tx.serialize() };
 }
 
-async function hasLanded(
-  connection: SendConnection,
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Polls `expiredSignatureStatus` (bounded) until it is decided or the checks run out. */
+async function settleExpired(
+  input: SendAndConfirmInput,
   signature: string,
-  commitment: Commitment,
-): Promise<boolean> {
-  const { value } = await connection.getSignatureStatuses([signature], {
-    searchTransactionHistory: true,
+  lastValidBlockHeight: number,
+): Promise<ExpiredSignatureState> {
+  const checks = Math.max(1, input.expiryChecks ?? DEFAULT_EXPIRY_CHECKS);
+  const waitMs = input.expiryCheckMs ?? DEFAULT_EXPIRY_CHECK_MS;
+  for (let check = 1; ; check++) {
+    const state = await expiredSignatureStatus(input.connection, signature, lastValidBlockHeight);
+    if (state !== 'unknown' || check >= checks) return state;
+    await sleep(waitMs);
+  }
+}
+
+/** Outcome unknown: the caller must resolve `signature` (e.g. `expiredSignatureStatus`) first. */
+function unresolved(signature: string, lastValidBlockHeight: number, cause: unknown): AppError {
+  return new AppError('chain_send_failed', {
+    message: 'send outcome unknown; resolve the persisted signature before retrying',
+    details: { signature, lastValidBlockHeight },
+    cause,
   });
-  const status = value[0];
-  if (!status || status.err !== null) return false;
-  return commitment === 'processed' || status.confirmationStatus !== 'processed';
+}
+
+/** Landed with an on-chain error: re-sending the same instructions cannot succeed. */
+function failedOnChain(signature: string, cause: unknown): AppError {
+  return new AppError('chain_send_failed', {
+    message: 'transaction failed on-chain',
+    details: { signature, landed: true },
+    cause,
+  });
 }
 
 /**
@@ -108,11 +179,16 @@ async function hasLanded(
  * `sendRawTransaction`; if it throws, nothing is sent.
  *
  * A new attempt is only made when the previous one is provably dead: the
- * blockhash expired without the tx landing, the RPC rejected the send
+ * blockhash expired and `expiredSignatureStatus` (finalized height past
+ * `lastValidBlockHeight`, finalized status or a ledger covering the whole
+ * validity window) finds it `absent`, or the RPC rejected the send
  * (`SendTransactionError`, nothing forwarded), or the tx landed with an
- * on-chain error. Anything else (network error, timeout, proxy 5xx) may have
- * reached the cluster, so the call fails with `chain_send_failed` and the
- * caller must resolve the persisted signature first (keeper: `pendingTx`).
+ * on-chain error and `buildTx` can re-quote it. An expired tx still `unknown`
+ * after `expiryChecks` polls, and anything else (network error, timeout, proxy
+ * 5xx) may have reached the cluster, so the call fails with `chain_send_failed`
+ * carrying `details.signature`/`details.lastValidBlockHeight`, and the caller
+ * must resolve that signature first (keeper: `pendingTx`). A fixed `tx` that
+ * failed on-chain is not re-sent (`chain_send_failed`, `details.landed: true`).
  */
 export async function sendAndConfirm(input: SendAndConfirmInput): Promise<SendResult> {
   const { connection, commitment } = input;
@@ -152,21 +228,24 @@ export async function sendAndConfirm(input: SendAndConfirmInput): Promise<SendRe
       );
       if (value.err === null) return { signature, landed: true, attempts: attempt };
       lastError = new Error(`transaction failed: ${JSON.stringify(value.err)}`);
+      if (!input.buildTx) throw failedOnChain(signature, lastError);
     } catch (err) {
+      if (err instanceof AppError) throw err;
       lastError = err;
       if (err instanceof TransactionExpiredBlockheightExceededError) {
-        if (await hasLanded(connection, signature, commitment)) {
-          return { signature, landed: true, attempts: attempt };
+        const state = await settleExpired(input, signature, latest.lastValidBlockHeight);
+        if (state === 'landed') return { signature, landed: true, attempts: attempt };
+        if (state === 'absent') continue;
+        if (state === 'failed') {
+          if (!input.buildTx) throw failedOnChain(signature, err);
+          continue;
         }
-        continue;
+        throw unresolved(signature, latest.lastValidBlockHeight, err);
       }
       // The RPC answered the send with an error, so nothing was forwarded: safe to re-sign.
       if (err instanceof SendTransactionError) continue;
       // Not provably dropped: the tx may still land. Never re-sign here (L258).
-      throw new AppError('chain_send_failed', {
-        message: 'send outcome unknown; resolve the persisted signature before retrying',
-        cause: err,
-      });
+      throw unresolved(signature, latest.lastValidBlockHeight, err);
     }
   }
 

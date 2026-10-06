@@ -37,11 +37,24 @@ export const LedgerResponseSchema = paginated(LedgerEntrySchema);
 
 const DateOrDateTimeSchema = z.union([z.iso.date(), IsoDateTimeSchema]);
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Exclusive end of a usage range: a date-only `to` covers that whole UTC day. */
+export function usageRangeEndMs(to: string): number {
+  return Date.parse(to) + (DATE_ONLY.test(to) ? DAY_MS : 0);
+}
+
 export const UsageQuerySchema = z
   .object({ from: DateOrDateTimeSchema.optional(), to: DateOrDateTimeSchema.optional() })
-  .refine((q) => !q.from || !q.to || Date.parse(q.from) <= Date.parse(q.to), {
-    message: '`from` must not be after `to`',
-  });
+  .refine(
+    (q) => {
+      if (!q.from || !q.to) return true;
+      const from = Date.parse(q.from);
+      return from < usageRangeEndMs(q.to) || from === Date.parse(q.to);
+    },
+    { message: '`from` must not be after `to`' },
+  );
 
 export const UsageRowSchema = z.object({
   date: z.iso.date(),

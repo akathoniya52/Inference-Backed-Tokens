@@ -16,10 +16,15 @@ import {
   credit,
   disconnectDb,
   expireHolds,
+  findDueCaptures,
   hold,
+  isHoldUnbilled,
+  markCaptureDue,
   recomputeBalance,
+  recomputeHeld,
   release,
   syncAllIndexes,
+  withTransaction,
   type RequestRecord,
 } from '../src/index.js';
 
@@ -50,6 +55,10 @@ function requestRecord(requestId: string): RequestRecord {
     streamed: false,
     upstreamStatus: 200,
   };
+}
+
+function utcYmd(date: Date): [number, number, number] {
+  return [date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()];
 }
 
 async function balances(userId: Types.ObjectId): Promise<{ balance: bigint; held: bigint }> {
@@ -227,6 +236,36 @@ describe('ledger service', () => {
       expect(await reserved(apiKeyId)).toBe(2n * USDC);
       expect(await Ledger.countDocuments({ type: 'hold' })).toBe(0);
     });
+
+    it('counts a capture after midnight on the day its hold reserved, not twice (DB-05)', async () => {
+      const userId = await newUser(100n * USDC);
+      const apiKeyId = new Types.ObjectId();
+      const today = new Date(Date.UTC(...utcYmd(new Date())));
+      const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+
+      // Held on yesterday's row; the request row is written now, i.e. today.
+      const late = await hold(userId, 2n * USDC, {
+        requestId: 'late',
+        dailyCap: { apiKeyId, day: yesterday, capMicro: 10n * USDC },
+      });
+      await capture(late.holdId, USDC, { ...requestRecord('late'), apiKeyId });
+      const request = await Requests.findOne({ requestId: 'late' }).orFail();
+      expect(request.dailyCapDay?.getTime()).toBe(yesterday.getTime());
+      expect(
+        (await DailySpend.findOne({ apiKeyId, day: yesterday }).orFail()).reservedMicroUsdc,
+      ).toBe(USDC);
+
+      // Today's row is seeded on its first hold: the late capture is not counted again,
+      // while an uncapped request written today still is.
+      await Requests.create({ ...requestRecord('uncapped'), userId, apiKeyId, costMicroUsdc: 3n });
+      await hold(userId, USDC, {
+        requestId: 'next',
+        dailyCap: { apiKeyId, day: today, capMicro: 10n * USDC },
+      });
+      expect((await DailySpend.findOne({ apiKeyId, day: today }).orFail()).reservedMicroUsdc).toBe(
+        USDC + 3n,
+      );
+    });
   });
 
   describe('capture', () => {
@@ -299,6 +338,57 @@ describe('ledger service', () => {
       );
       expect(isAppError(err) && err.code).toBe('not_found');
     });
+
+    it('refuses a cost above the hold and leaves the hold open (DB-01)', async () => {
+      const userId = await newUser(5n * USDC);
+      const apiKeyId = new Types.ObjectId();
+      const day = new Date(Date.UTC(2026, 9, 5));
+      const h = await hold(userId, 2n * USDC, {
+        requestId: 'r1',
+        dailyCap: { apiKeyId, day, capMicro: 10n * USDC },
+      });
+
+      const err: unknown = await capture(h.holdId, 2n * USDC + 1n, requestRecord('r1')).catch(
+        (e: unknown) => e,
+      );
+
+      expect(isAppError(err) && err.code).toBe('internal');
+      expect(isAppError(err) && err.toEnvelope().error.message).toBe('internal error');
+      expect(await balances(userId)).toEqual({ balance: 5n * USDC, held: 2n * USDC });
+      expect((await Ledger.findById(h.holdId).orFail()).status).toBe('open');
+      expect(await Ledger.countDocuments({ type: 'capture' })).toBe(0);
+      expect(await Requests.countDocuments({})).toBe(0);
+      expect((await DailySpend.findOne({ apiKeyId, day }).orFail()).reservedMicroUsdc).toBe(
+        2n * USDC,
+      );
+
+      await capture(h.holdId, 2n * USDC, requestRecord('r1'));
+      expect(await balances(userId)).toEqual({ balance: 3n * USDC, held: 0n });
+    });
+
+    it('allows one capture row per hold (DB-04)', async () => {
+      const userId = await newUser(5n * USDC);
+      const h = await hold(userId, 2n * USDC, { requestId: 'r1' });
+      const { entry } = await capture(h.holdId, USDC, requestRecord('r1'));
+
+      await expect(
+        Ledger.create({
+          userId,
+          type: 'capture',
+          amountMicroUsdc: -USDC,
+          ref: { requestId: 'r1', holdId: h.holdId },
+        }),
+      ).rejects.toThrow(/duplicate key/);
+      const lookup = await Ledger.find({ type: 'capture', 'ref.holdId': h.holdId })
+        .explain('queryPlanner')
+        .then((plan) =>
+          JSON.stringify(plan, (_key, value: unknown) =>
+            typeof value === 'bigint' ? value.toString() : value,
+          ),
+        );
+      expect(lookup).toContain('IXSCAN');
+      expect(entry.ref.holdId?.equals(h.holdId)).toBe(true);
+    });
   });
 
   describe('release', () => {
@@ -358,6 +448,45 @@ describe('ledger service', () => {
     });
   });
 
+  describe('due captures (GW-12)', () => {
+    it('a hold with a capture due is never released or expired, only captured once', async () => {
+      const userId = await newUser(10n * USDC);
+      const now = Date.now();
+      const { holdId } = await hold(userId, 2n * USDC, { requestId: 'due', expiresInMs: 1_000 });
+      const record = { ...requestRecord('due'), streamed: true };
+      expect(await markCaptureDue(holdId, 3n * USDC, record)).toBe(false);
+      expect(await markCaptureDue(holdId, USDC, record)).toBe(true);
+
+      expect((await release(holdId)).released).toBe(false);
+      expect(await expireHolds(new Date(now + 60_000))).toBe(0);
+      expect(await isHoldUnbilled(holdId)).toBe(false);
+      expect(await findDueCaptures(new Date(now))).toEqual([]);
+      const [due, ...rest] = await findDueCaptures(new Date(now + 60_000));
+      expect(rest).toEqual([]);
+      expect(due).toEqual({ holdId, costMicro: USDC, request: record });
+      if (!due) throw new Error('no due capture');
+
+      await capture(due.holdId, due.costMicro, due.request);
+      expect((await capture(due.holdId, due.costMicro, due.request)).alreadyCaptured).toBe(true);
+      expect(await balances(userId)).toEqual({ balance: 9n * USDC, held: 0n });
+      expect(await findDueCaptures(new Date(now + 60_000))).toEqual([]);
+      // A closed hold takes no due capture.
+      expect(await markCaptureDue(holdId, USDC, record)).toBe(false);
+    });
+
+    it('isHoldUnbilled is true only for released or expired holds', async () => {
+      const userId = await newUser(10n * USDC);
+      const released = await hold(userId, USDC, { requestId: 'u1' });
+      await release(released.holdId);
+      const captured = await hold(userId, USDC, { requestId: 'u2' });
+      await capture(captured.holdId, 1n, requestRecord('u2'));
+      const open = await hold(userId, USDC, { requestId: 'u3' });
+      expect(await isHoldUnbilled(released.holdId)).toBe(true);
+      expect(await isHoldUnbilled(captured.holdId)).toBe(false);
+      expect(await isHoldUnbilled(open.holdId)).toBe(false);
+    });
+  });
+
   describe('credit and adjust', () => {
     it('credits a deposit by signature and a settlement credit by id', async () => {
       const userId = await newUser();
@@ -389,6 +518,52 @@ describe('ledger service', () => {
     it('rejects an unknown user with not_found', async () => {
       const err: unknown = await adjust(new Types.ObjectId(), 1n, 'x').catch((e: unknown) => e);
       expect(isAppError(err) && err.code).toBe('not_found');
+      const debit: unknown = await adjust(new Types.ObjectId(), -1n, 'x').catch((e: unknown) => e);
+      expect(isAppError(debit) && debit.code).toBe('not_found');
+    });
+
+    it('floors a negative delta at spendable funds unless allowNegative (DB-02)', async () => {
+      const userId = await newUser(5n * USDC);
+      await hold(userId, 2n * USDC, { requestId: 'h' });
+
+      const err: unknown = await adjust(userId, -3n * USDC - 1n, 'clawback').catch(
+        (e: unknown) => e,
+      );
+      expect(isAppError(err) && err.code).toBe('insufficient_credits');
+      expect(isAppError(err) && err.details).toEqual({ shortfallUsdc: '0.000001' });
+      expect(await balances(userId)).toEqual({ balance: 5n * USDC, held: 2n * USDC });
+      expect(await Ledger.countDocuments({ type: 'adjust' })).toBe(0);
+
+      expect((await adjust(userId, -3n * USDC, 'clawback')).balanceMicro).toBe(2n * USDC);
+      const forced = await adjust(userId, -5n * USDC, 'chargeback', { allowNegative: true });
+      expect(forced.balanceMicro).toBe(-3n * USDC);
+      expect(await balances(userId)).toEqual({ balance: -3n * USDC, held: 2n * USDC });
+    });
+
+    it('concurrent debits never take spendable funds below zero', async () => {
+      const userId = await newUser(5n * USDC);
+      const results = await Promise.allSettled(
+        Array.from({ length: 8 }, () => adjust(userId, -USDC, 'debit')),
+      );
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(5);
+      expect((await balances(userId)).balance).toBe(0n);
+    }, 60_000);
+
+    it('credits a deposit signature or a settlement at most once (DB-03)', async () => {
+      const userId = await newUser();
+      const settlementId = new Types.ObjectId();
+      await credit(userId, USDC, { txSignature: SIG });
+      await credit(userId, USDC, { settlementId });
+
+      await expect(credit(userId, USDC, { txSignature: SIG })).rejects.toThrow(/duplicate key/);
+      await expect(credit(userId, USDC, { settlementId })).rejects.toThrow(/duplicate key/);
+      expect((await balances(userId)).balance).toBe(2n * USDC);
+      expect(await recomputeBalance(userId)).toBe(2n * USDC);
+
+      // Manual adjustments carry no settlement id and stay unconstrained.
+      await adjust(userId, USDC, 'manual');
+      await adjust(userId, USDC, 'manual');
+      expect((await balances(userId)).balance).toBe(4n * USDC);
     });
   });
 
@@ -415,6 +590,47 @@ describe('ledger service', () => {
       expect(await recomputeBalance(userId)).toBe(stored.balance);
       expect(await recomputeBalance(other)).toBe(7n * USDC);
       expect(await recomputeBalance(new Types.ObjectId())).toBe(0n);
+    });
+  });
+
+  describe('recomputeHeld (KPR-07)', () => {
+    it('equals the stored held amount: open holds only', async () => {
+      const userId = await newUser(10n * USDC);
+      await hold(userId, 2n * USDC, { requestId: 'o1' });
+      await hold(userId, 3n * USDC, { requestId: 'o2' });
+      const captured = await hold(userId, USDC, { requestId: 'c' });
+      await capture(captured.holdId, 1n, requestRecord('c'));
+      const released = await hold(userId, USDC, { requestId: 'r' });
+      await release(released.holdId);
+
+      expect(await recomputeHeld(userId)).toBe(5n * USDC);
+      expect((await balances(userId)).held).toBe(5n * USDC);
+      expect(await recomputeHeld(new Types.ObjectId())).toBe(0n);
+    });
+
+    it('reads cached and ledger values in one transaction snapshot', async () => {
+      const userId = await newUser(10n * USDC);
+      await hold(userId, 2n * USDC, { requestId: 's1' });
+
+      const seen = await withTransaction(async (session) => {
+        const user = await Users.findById(userId, null, { session }).orFail();
+        // A credit committed after the snapshot opened stays invisible to it.
+        await credit(userId, USDC, { txSignature: `${SIG}late` });
+        return {
+          balance: user.balanceMicroUsdc,
+          held: user.heldMicroUsdc,
+          ledgerBalance: await recomputeBalance(userId, { session }),
+          ledgerHeld: await recomputeHeld(userId, { session }),
+        };
+      });
+
+      expect(seen).toEqual({
+        balance: 10n * USDC,
+        held: 2n * USDC,
+        ledgerBalance: 10n * USDC,
+        ledgerHeld: 2n * USDC,
+      });
+      expect(await recomputeBalance(userId)).toBe(11n * USDC);
     });
   });
 });

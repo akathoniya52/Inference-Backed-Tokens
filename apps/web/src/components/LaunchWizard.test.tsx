@@ -1,3 +1,4 @@
+import { ModelSchema } from '@ibt/shared';
 import { DynamicBondingCurveClient } from '@meteora-ag/dynamic-bonding-curve-sdk';
 import {
   useConnection,
@@ -6,11 +7,14 @@ import {
   type WalletContextState,
 } from '@solana/wallet-adapter-react';
 import { PublicKey, Transaction, type Connection, type Keypair } from '@solana/web3.js';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import bs58 from 'bs58';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { clearToken, setToken } from '../lib/auth';
+import { metadataUri } from '../lib/launch';
 import { TestProviders } from '../test-utils';
 import { LaunchWizard } from './LaunchWizard';
 
@@ -93,6 +97,10 @@ function json(status: number, body: unknown) {
 
 const fetchMock = vi.fn<typeof fetch>();
 let healthOk = true;
+let confirmResponse: (() => Response) | null = null;
+let prepareMetadataUri: string | undefined;
+const SENT_SIG = bs58.encode(new Uint8Array(64).fill(3));
+const STORAGE_KEY = 'ibt:launch:llama-fast';
 
 function calledPaths(): string[] {
   return fetchMock.mock.calls.map(
@@ -171,8 +179,12 @@ beforeEach(() => {
         ),
       [`PATCH /api/models/${MODEL_ID}`]: () => json(200, ownerModel),
       'POST /api/tokens/launch/prepare': () =>
-        json(200, { token: { status: 'pending', mint: mint.publicKey.toBase58() } }),
+        json(200, {
+          token: { status: 'pending', mint: mint.publicKey.toBase58() },
+          ...(prepareMetadataUri === undefined ? {} : { metadataUri: prepareMetadataUri }),
+        }),
       'POST /api/tokens/launch/confirm': () =>
+        confirmResponse?.() ??
         json(200, {
           token: {
             status: 'curve',
@@ -200,8 +212,28 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  vi.restoreAllMocks();
   clearToken();
+  confirmResponse = null;
+  prepareMetadataUri = undefined;
+  window.localStorage.clear();
 });
+
+function renderResumed(resume: unknown) {
+  cleanup();
+  render(
+    <TestProviders>
+      <MemoryRouter>
+        <LaunchWizard generateMint={() => mint} resume={ModelSchema.parse(resume)} />
+      </MemoryRouter>
+    </TestProviders>,
+  );
+}
+
+const pendingModel = {
+  ...ownerModel,
+  token: { ...ownerModel.token, status: 'pending', symbol: 'LLAMA', mint: key(5).toBase58() },
+};
 
 describe('LaunchWizard', () => {
   it('validates the registration form before calling the api', () => {
@@ -319,6 +351,34 @@ describe('LaunchWizard', () => {
     expect(partialSign.mock.invocationCallOrder[0]).toBeLessThan(signOrder);
   });
 
+  it('builds the pool with the metadata URI that prepare returned (API-06)', async () => {
+    prepareMetadataUri = `https://api.prod.example/metadata/${mint.publicKey.toBase58()}.json`;
+    await reachStep('launch');
+    fill('Token symbol', 'LLAMA');
+    fireEvent.click(screen.getByRole('button', { name: 'Launch token' }));
+    await screen.findByRole('link', { name: 'View token page' });
+    expect(createPool.mock.calls[0]?.[0]).toMatchObject({ uri: prepareMetadataUri });
+  });
+
+  it('refuses a returned metadata URI that is not https or not for this mint', async () => {
+    prepareMetadataUri = `http://api.prod.example/metadata/${mint.publicKey.toBase58()}.json`;
+    await reachStep('launch');
+    fill('Token symbol', 'LLAMA');
+    fireEvent.click(screen.getByRole('button', { name: 'Launch token' }));
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toMatch(/unexpected token metadata URI/),
+    );
+    expect(createPool).not.toHaveBeenCalled();
+    expect(signTransaction).not.toHaveBeenCalled();
+    const own = `/metadata/${mint.publicKey.toBase58()}.json`;
+    expect(() => metadataUri(mint.publicKey, 'https://api.prod.example/metadata/x.json')).toThrow();
+    expect(() => metadataUri(mint.publicKey, `https://api.prod.example${own}?x=1`)).toThrow();
+    expect(() => metadataUri(mint.publicKey, `javascript:alert(1)//${own}`)).toThrow();
+    expect(metadataUri(mint.publicKey, `http://localhost:4000${own}`)).toBe(
+      `http://localhost:4000${own}`,
+    );
+  });
+
   it('shows the launch error and does not confirm when the wallet rejects', async () => {
     await reachStep('launch');
     signTransaction.mockRejectedValueOnce(new Error('User rejected the request.'));
@@ -326,5 +386,141 @@ describe('LaunchWizard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Launch token' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/rejected/i));
     expect(calledPaths()).not.toContain('POST /api/tokens/launch/confirm');
+  });
+
+  it('offers "Retry confirmation" instead of a second pool when confirm fails', async () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    connection.sendRawTransaction.mockResolvedValueOnce(SENT_SIG);
+    confirmResponse = () => json(503, { error: { code: 'upstream_error', message: 'try later' } });
+    await reachStep('launch');
+    fill('Token symbol', 'LLAMA');
+    fireEvent.click(screen.getByRole('button', { name: 'Launch token' }));
+
+    const retry = await screen.findByRole('button', { name: 'Retry confirmation' });
+    expect(screen.queryByRole('button', { name: 'Launch token' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Discard and launch again' })).toBeNull();
+    const stored = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? 'null') as unknown;
+    expect(stored).toEqual({
+      v: 1,
+      modelId: MODEL_ID,
+      mint: mint.publicKey.toBase58(),
+      symbol: 'LLAMA',
+      signature: SENT_SIG,
+    });
+
+    confirmResponse = null;
+    fireEvent.click(retry);
+    expect(await screen.findByRole('link', { name: 'View token page' })).toBeTruthy();
+    expect(createPool).toHaveBeenCalledTimes(1);
+    expect(signTransaction).toHaveBeenCalledTimes(1);
+    expect(body('/api/tokens/launch/confirm')).toEqual({
+      modelId: MODEL_ID,
+      mint: mint.publicKey.toBase58(),
+      signature: SENT_SIG,
+    });
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
+
+    const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
+    expect(keys).toEqual(
+      expect.arrayContaining([
+        ['models', 'list'],
+        ['model', 'llama-fast'],
+        ['tokenState', mint.publicKey.toBase58()],
+        ['providerModels'],
+      ]),
+    );
+  });
+
+  it('re-uses the same mint when the wallet rejects and the user tries again', async () => {
+    const generate = vi.fn(() => mint);
+    cleanup();
+    render(
+      <TestProviders>
+        <MemoryRouter>
+          <LaunchWizard generateMint={generate} resume={ModelSchema.parse(ownerModel)} />
+        </MemoryRouter>
+      </TestProviders>,
+    );
+    signTransaction.mockRejectedValueOnce(new Error('User rejected the request.'));
+    fill('Token symbol', 'LLAMA');
+    fireEvent.click(screen.getByRole('button', { name: 'Launch token' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/rejected/i));
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Launch token' }));
+    expect(await screen.findByRole('link', { name: 'View token page' })).toBeTruthy();
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumes a registered model at the launch step without registering it again', async () => {
+    renderResumed(ownerModel);
+    expect(screen.getByRole('heading', { name: 'Launch the token' })).toBeTruthy();
+    fill('Token symbol', 'LLAMA');
+    fireEvent.click(screen.getByRole('button', { name: 'Launch token' }));
+
+    expect(await screen.findByRole('link', { name: 'View token page' })).toBeTruthy();
+    expect(calledPaths()).not.toContain('POST /api/models');
+    expect(calledPaths()).toContain('POST /api/tokens/launch/prepare');
+  });
+
+  it('after a reload, confirms the stored attempt instead of launching again', async () => {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        v: 1,
+        modelId: MODEL_ID,
+        mint: key(5).toBase58(),
+        symbol: 'LLAMA',
+        signature: SENT_SIG,
+      }),
+    );
+    renderResumed(pendingModel);
+    expect(screen.queryByRole('button', { name: 'Launch token' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry confirmation' }));
+
+    expect(await screen.findByRole('link', { name: 'View token page' })).toBeTruthy();
+    expect(calledPaths()).not.toContain('POST /api/tokens/launch/prepare');
+    expect(createPool).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stored attempt with a bad shape or for another mint', () => {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ v: 1, mint: 'x', secretKey: [1] }));
+    renderResumed(pendingModel);
+    expect(screen.getByRole('button', { name: 'Launch token' })).toBeTruthy();
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
+
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        v: 1,
+        modelId: MODEL_ID,
+        mint: key(6).toBase58(),
+        symbol: 'LLAMA',
+        signature: SENT_SIG,
+      }),
+    );
+    renderResumed(pendingModel);
+    expect(screen.getByRole('button', { name: 'Launch token' })).toBeTruthy();
+  });
+
+  it('allows starting over only once the api finds no pool for the signature', async () => {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        v: 1,
+        modelId: MODEL_ID,
+        mint: key(5).toBase58(),
+        symbol: 'LLAMA',
+        signature: SENT_SIG,
+      }),
+    );
+    confirmResponse = () =>
+      json(422, { error: { code: 'pool_mismatch', message: 'launch transaction failed' } });
+    renderResumed(pendingModel);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry confirmation' }));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Discard and launch again' }));
+    expect(screen.getByRole('button', { name: 'Launch token' })).toBeTruthy();
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
   });
 });

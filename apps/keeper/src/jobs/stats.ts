@@ -24,7 +24,8 @@ interface LiquidityRow {
  * share with status `success`, `revenueMicroUsdc` the cost of every billed request
  * (including streams captured after an early stop; released ones cost 0). `lockedLiquidityLamports`
  * sums `liquidity.solAddedLamports` over the model's `done` settlements (all time); the
- * api renders it as `lockedLiquiditySol`.
+ * api renders it as `lockedLiquiditySol`. Only `graduated` settlements count: curve buys
+ * hold tokens, they lock nothing.
  */
 export function createStatsJob(ctx: Pick<KeeperCtx, 'clock' | 'logger'>) {
   const log = ctx.logger.child({ job: 'stats' });
@@ -43,7 +44,8 @@ export function createStatsJob(ctx: Pick<KeeperCtx, 'clock' | 'logger'>) {
         },
       ]);
       const liquidity = await Settlements.aggregate<LiquidityRow>([
-        { $match: { state: 'done' } },
+        // Curve buys are not locked liquidity (KPR-12): only graduated adds are locked.
+        { $match: { state: 'done', 'liquidity.phase': 'graduated' } },
         { $group: { _id: '$modelId', lamports: { $sum: '$liquidity.solAddedLamports' } } },
       ]);
       const byModel = new Map(requests.map((row) => [row._id.toHexString(), row]));

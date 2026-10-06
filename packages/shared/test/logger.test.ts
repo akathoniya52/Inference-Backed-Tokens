@@ -10,7 +10,32 @@ import {
   createLogger,
   decrypt,
   encrypt,
+  redactSecrets,
 } from '../src/node/index.js';
+
+describe('redactSecrets', () => {
+  it('scrubs URL userinfo, query strings and key-shaped path segments', () => {
+    expect(redactSecrets('RPC 429 from https://mainnet.helius-rpc.com/?api-key=abc123')).toBe(
+      'RPC 429 from https://mainnet.helius-rpc.com/?***',
+    );
+    expect(
+      redactSecrets('connect mongodb+srv://ibt:hunter2@cluster0.x.net/ibt?retryWrites=1'),
+    ).toBe('connect mongodb+srv://***@cluster0.x.net/ibt?***');
+    expect(
+      redactSecrets('POST https://sol.g.alchemy.com/v2/AbCdEf0123456789AbCdEf0123 failed'),
+    ).toBe('POST https://sol.g.alchemy.com/v2/*** failed');
+  });
+
+  it('scrubs key parameters and authorization credentials outside URLs', () => {
+    expect(redactSecrets('bad api_key=s3cr3t&x=1')).toBe('bad api_key=***&x=1');
+    expect(redactSecrets('header Bearer sk-abc.def')).toBe('header Bearer ***');
+  });
+
+  it('leaves text without credentials unchanged', () => {
+    const text = 'model 6650aa not found at https://api.example.com/v1/models (502)';
+    expect(redactSecrets(text)).toBe(text);
+  });
+});
 
 // Deliberately fake; the only secret-shaped value in this file.
 const FAKE_UPSTREAM_KEY = 'sk-fake-upstream-key-must-never-be-logged';
@@ -22,6 +47,11 @@ const SECRET_ENV_NAMES = [
   'KEEPER_SECRET_KEY',
   'TREASURY_SECRET_KEY',
   'TELEGRAM_BOT_TOKEN',
+  'RPC_URL',
+  'RPC_URL_FALLBACK',
+  'MONGODB_URI',
+  'JUPITER_API_KEY',
+  'DEVNET_FUNDER_SECRET_KEY',
 ];
 
 function capture(redact?: string[]) {
@@ -50,30 +80,65 @@ function upstreamFailure() {
 }
 
 describe('createLogger', () => {
-  it('redacts exactly the documented paths', () => {
-    expect(REDACT_PATHS).toEqual([
-      'req.headers.authorization',
-      'req.headers.cookie',
-      'err.headers',
-      '*.apiKey',
-      '*.apiKeyEnc',
-      'MASTER_KEY',
-      'JWT_SECRET',
-      'ADMIN_TOKEN',
-      'KEEPER_SECRET_KEY',
-      'TREASURY_SECRET_KEY',
-      'TELEGRAM_BOT_TOKEN',
-      '*.MASTER_KEY',
-      '*.JWT_SECRET',
-      '*.ADMIN_TOKEN',
-      '*.KEEPER_SECRET_KEY',
-      '*.TREASURY_SECRET_KEY',
-      '*.TELEGRAM_BOT_TOKEN',
-      'err.headers.authorization',
-      'headers.authorization',
-      '*.headers.authorization',
-      'err.config.headers.authorization',
-    ]);
+  it('redacts every documented path, each once', () => {
+    expect(new Set(REDACT_PATHS).size).toBe(REDACT_PATHS.length);
+    expect(REDACT_PATHS).toEqual(
+      expect.arrayContaining([
+        'req.headers.authorization',
+        'req.headers.cookie',
+        'err.headers',
+        '*.apiKey',
+        '*.apiKeyEnc',
+        'MASTER_KEY',
+        'JWT_SECRET',
+        'ADMIN_TOKEN',
+        'KEEPER_SECRET_KEY',
+        'TREASURY_SECRET_KEY',
+        'TELEGRAM_BOT_TOKEN',
+        '*.MASTER_KEY',
+        '*.JWT_SECRET',
+        '*.ADMIN_TOKEN',
+        '*.KEEPER_SECRET_KEY',
+        '*.TREASURY_SECRET_KEY',
+        '*.TELEGRAM_BOT_TOKEN',
+        'err.headers.authorization',
+        'headers.authorization',
+        '*.headers.authorization',
+        'err.config.headers.authorization',
+        '*.*.apiKey',
+        '*.*.*.*.apiKey',
+        '*.*.headers.authorization',
+        'RPC_URL',
+        '*.RPC_URL_FALLBACK',
+        '*.MONGODB_URI',
+        '*.JUPITER_API_KEY',
+        '*.DEVNET_FUNDER_SECRET_KEY',
+      ]),
+    );
+  });
+
+  it('censors apiKey and secret env names nested several levels deep (DB-07)', () => {
+    const { logger, output } = capture();
+    logger.info(
+      {
+        a: { b: { apiKey: FAKE_UPSTREAM_KEY } },
+        c: { d: { e: { f: { apiKey: FAKE_UPSTREAM_KEY } } } },
+        cfg: { env: { RPC_URL: FAKE_UPSTREAM_KEY, MONGODB_URI: FAKE_UPSTREAM_KEY } },
+        x: { y: { headers: { authorization: FAKE_UPSTREAM_KEY } } },
+        DEVNET_FUNDER_SECRET_KEY: FAKE_UPSTREAM_KEY,
+      },
+      'deep',
+    );
+    expect(output()).not.toContain(FAKE_UPSTREAM_KEY);
+  });
+
+  it('scrubs credentials from logged error messages and stacks', () => {
+    const { logger, output } = capture();
+    const err = new Error(`fetch failed: https://rpc.helius.test/?api-key=${FAKE_UPSTREAM_KEY}`);
+    logger.error({ err }, 'rpc');
+    logger.error(new Error(`mongodb+srv://u:${FAKE_UPSTREAM_KEY}@db.test/x failed`), 'mongo');
+    expect(output()).not.toContain(FAKE_UPSTREAM_KEY);
+    expect(output()).toContain('https://rpc.helius.test/?***');
   });
 
   const placements: [string, (logger: Logger, key: string) => void][] = [

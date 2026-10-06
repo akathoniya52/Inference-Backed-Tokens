@@ -6,5 +6,5 @@
     "tsBuildInfoFile": "dist/.test.tsbuildinfo"
   },
   "include": ["src", "test", "vitest.config.ts"],
-  "references": []
+  "references": [{ "path": "../../packages/shared" }]
 }

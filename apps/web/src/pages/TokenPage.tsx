@@ -2,7 +2,7 @@ import type { Model, PricePoint, TokenStateResponse } from '@ibt/shared';
 import type { ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 
-import { OwnerClaimFees } from '../components/ClaimFees';
+import { ClaimFees } from '../components/ClaimFees';
 import { CopyButton } from '../components/CodeBlock';
 import { CurveProgress } from '../components/CurveProgress';
 import { formatMTokPrice, PhaseBadge } from '../components/ModelCard';
@@ -25,12 +25,12 @@ type Slot = (context: TokenSlotContext) => ReactNode;
 interface TokenPageProps {
   /** Replaces the default `TradePanel`; tests inject a stub. */
   tradePanel?: Slot;
-  /** Replaces the default owner-only `ClaimFees`; tests inject a stub. */
+  /** Replaces the default `ClaimFees` (provider or fee claimer only); tests inject a stub. */
   claimFees?: Slot;
 }
 
 const defaultTradePanel: Slot = ({ model }) => <TradePanel model={model} />;
-const defaultClaimFees: Slot = ({ model }) => <OwnerClaimFees model={model} />;
+const defaultClaimFees: Slot = ({ model }) => <ClaimFees model={model} />;
 
 const SECTION_LABEL = 'font-mono text-xs uppercase tracking-label text-ink-400';
 const PANEL = 'rounded-sm border border-ink-800 bg-ink-900/60 p-6';

@@ -1,6 +1,7 @@
 // Seeds the local model set (work plan P8-T2, §9). Upstream defaults to the mock on :4010.
-// `--dev-credit` and `--fake-token` are local-only (G23): refused on mainnet-beta and against
-// any MONGODB_URI that is not on localhost/127.0.0.1.
+// Every mode is local-only (G23): refused on mainnet-beta and against any MONGODB_URI that is
+// not on localhost/127.0.0.1. `--allow-remote` lifts only the host check, and only for a plain
+// seed; `--dev-credit` and `--fake-token` stay local-only.
 import { parseArgs } from 'node:util';
 
 import { createFakeChain, type FakeChainTx, saveFakeSolUsd } from '@ibt/chain/testing';
@@ -22,7 +23,7 @@ import { Keypair, PublicKey } from '@solana/web3.js';
 import { CliError, EXIT_OK, EXIT_REFUSED, isMain, runMain } from './lib/cli.js';
 
 const USAGE =
-  'usage: seed-models.ts [--owner <wallet>] [--dev-credit <wallet> <usdc>] [--fake-token]\n' +
+  'usage: seed-models.ts [--owner <wallet>] [--dev-credit <wallet> <usdc>] [--fake-token] [--allow-remote]\n' +
   '  env: MONGODB_URI, MASTER_KEY (required); MOCK_UPSTREAM_PORT, CLUSTER, DBC_CONFIG (optional)';
 const LOCAL_MONGO_HOSTS = new Set(['localhost', '127.0.0.1']);
 const DEV_CREDIT_REASON = 'dev_credit';
@@ -56,6 +57,8 @@ export interface SeedOptions {
   owner?: string | undefined;
   devCredit?: { wallet: string; usdc: string } | null;
   fakeToken?: boolean;
+  /** Lets a plain seed write to a non-local MONGODB_URI (never on mainnet-beta). */
+  allowRemote?: boolean;
   /** Source of `MONGODB_URI`, `MASTER_KEY`, `CLUSTER`, ...; defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
 }
@@ -64,6 +67,7 @@ interface Flags {
   owner: string | undefined;
   devCredit: { wallet: string; usdc: string } | null;
   fakeToken: boolean;
+  allowRemote: boolean;
 }
 
 function parseFlags(): Flags {
@@ -75,6 +79,7 @@ function parseFlags(): Flags {
         owner: { type: 'string' },
         'dev-credit': { type: 'string' },
         'fake-token': { type: 'boolean' },
+        'allow-remote': { type: 'boolean' },
       },
       strict: true,
       allowPositionals: true,
@@ -93,6 +98,7 @@ function parseFlags(): Flags {
     owner: values.owner,
     devCredit: wallet !== undefined && usdc !== undefined ? { wallet, usdc } : null,
     fakeToken: values['fake-token'] ?? false,
+    allowRemote: values['allow-remote'] ?? false,
   };
 }
 
@@ -105,22 +111,30 @@ function mongoHost(uri: string): string | null {
   }
 }
 
-/** G23: runs before any connection or write. */
-function assertLocalOnly(flag: string, uri: string, env: NodeJS.ProcessEnv): void {
+function assertNotMainnet(what: string, env: NodeJS.ProcessEnv): void {
   if (env.CLUSTER?.trim() === 'mainnet-beta') {
     throw new CliError(
-      `refusing ${flag}: CLUSTER is mainnet-beta; nothing was written`,
+      `refusing ${what}: CLUSTER is mainnet-beta; nothing was written`,
       EXIT_REFUSED,
     );
   }
+}
+
+function assertLocalMongo(what: string, uri: string): void {
   const host = mongoHost(uri);
   if (host === null || !LOCAL_MONGO_HOSTS.has(host)) {
     throw new CliError(
-      `refusing ${flag}: MONGODB_URI host ${host ?? '<unparseable>'} is not localhost or 127.0.0.1; ` +
+      `refusing ${what}: MONGODB_URI host ${host ?? '<unparseable>'} is not localhost or 127.0.0.1; ` +
         'nothing was written',
       EXIT_REFUSED,
     );
   }
+}
+
+/** G23: runs before any connection or write. */
+function assertLocalOnly(what: string, uri: string, env: NodeJS.ProcessEnv): void {
+  assertNotMainnet(what, env);
+  assertLocalMongo(what, uri);
 }
 
 function requireEnv(env: NodeJS.ProcessEnv, name: string): string {
@@ -260,10 +274,13 @@ export async function seedModels(options: SeedOptions = {}) {
     owner: options.owner,
     devCredit: options.devCredit ?? null,
     fakeToken: options.fakeToken ?? false,
+    allowRemote: options.allowRemote ?? false,
   };
   const uri = requireEnv(env, 'MONGODB_URI');
   if (flags.devCredit) assertLocalOnly('--dev-credit', uri, env);
   if (flags.fakeToken) assertLocalOnly('--fake-token', uri, env);
+  assertNotMainnet('seed-models', env);
+  if (!flags.allowRemote) assertLocalMongo('seed-models without --allow-remote', uri);
 
   const masterKey = requireEnv(env, 'MASTER_KEY');
   const credit = flags.devCredit && {

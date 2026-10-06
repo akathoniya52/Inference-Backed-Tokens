@@ -11,7 +11,9 @@ import {
   dammPoolDto,
   deriveDammPool,
   depositQuote,
+  maxBeforeSlippage,
   quoteSwap,
+  withSlippageUp,
   readDammPool,
   type DammPool,
 } from '../src/damm.js';
@@ -108,7 +110,7 @@ describe('reads and quotes', () => {
     const params = getQuote2.mock.calls[0]?.[0];
     expect(params).toMatchObject({
       inputTokenMint: NATIVE_MINT,
-      slippage: 1,
+      slippage: 100,
       poolState: state,
       tokenADecimal: 6,
       tokenBDecimal: 9,
@@ -116,6 +118,24 @@ describe('reads and quotes', () => {
       swapMode: DammSwapMode.ExactIn,
     });
     expect(params && 'amountIn' in params ? params.amountIn.toString() : null).toBe('1000');
+  });
+
+  it('quoteSwap rejects slippage that is not whole basis points', async () => {
+    const conn = connection();
+    for (const slippageBps of [0.5, -1, 10_000]) {
+      await expect(
+        quoteSwap(conn, pool, { inputMint: NATIVE_MINT, amountIn: 1_000n, slippageBps }),
+      ).rejects.toThrow(RangeError);
+    }
+  });
+
+  it('slippage helpers buffer maximums up and keep them within a cap', () => {
+    expect(withSlippageUp(10_000n, 100)).toBe(10_100n);
+    expect(withSlippageUp(1n, 100)).toBe(2n);
+    expect(withSlippageUp(500n, 0)).toBe(500n);
+    const base = maxBeforeSlippage(1_000_000n, 100);
+    expect(base).toBe(990_099n);
+    expect(withSlippageUp(base, 100)).toBeLessThanOrEqual(1_000_000n);
   });
 
   it('depositQuote passes pool prices and reserves to getDepositQuote', () => {

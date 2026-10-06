@@ -10,7 +10,7 @@ import { pinoHttp } from 'pino-http';
 import type { Dispatcher } from 'undici';
 
 import { createApiAlerts, type ApiAlerts } from './alerts.js';
-import { getAuthUser, getRequestId, type Clock } from './context.js';
+import { getAuthUser, getClientRequestId, getRequestId, type Clock } from './context.js';
 import type { ApiEnv } from './env.js';
 import { createUpstreamAgent } from './lib/upstreamAgent.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
@@ -134,12 +134,25 @@ export function createApp(deps: AppDeps): Express {
       genReqId: (req) => getRequestId(req) ?? 'unknown',
       customProps: (req) => ({
         requestId: getRequestId(req),
+        clientRequestId: getClientRequestId(req),
         userId: getAuthUser(req)?.userId,
         route: req.url,
       }),
     }),
   );
   app.use(helmet());
+  // API-04: token metadata is public JSON that wallets, explorers and DEX UIs on
+  // any origin fetch: any origin, GET only, never credentials. Mounted before the
+  // app-wide CORS rule, which stays limited to WEB_ORIGIN.
+  app.use(
+    '/metadata',
+    cors({ origin: '*', methods: ['GET', 'HEAD'], credentials: false }),
+    (_req, res, next) => {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      next();
+    },
+    metadataRouter(ctx),
+  );
   app.use(cors({ origin: [env.WEB_ORIGIN] }));
   app.use(express.json({ limit: BODY_LIMIT_BYTES }));
 
@@ -161,11 +174,14 @@ export function createApp(deps: AppDeps): Express {
   app.use('/api/models', modelsRouter(ctx));
   app.use('/api/tokens', tokensRouter(ctx));
   app.use('/v1', gatewayRouter(ctx));
-  app.use('/metadata', metadataRouter(ctx));
 
   deps.extraRoutes?.(app, ctx);
 
   app.use(notFound());
-  app.use(errorHandler(logger));
+  app.use(
+    errorHandler(logger, (res) => {
+      ctx.alerts.markFailed(res);
+    }),
+  );
   return app;
 }

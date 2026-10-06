@@ -6,13 +6,13 @@ import {
   type WalletContextState,
 } from '@solana/wallet-adapter-react';
 import { PublicKey, Transaction, TransactionInstruction, type Connection } from '@solana/web3.js';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { curveModel, GRADUATED_DAMM_POOL, graduatedModel } from '../fixtures/models';
-import { resolveClaimRole } from '../lib/claims';
+import { resolveClaimRoles } from '../lib/claims';
 import { TestProviders } from '../test-utils';
-import { ClaimFees, OwnerClaimFees } from './ClaimFees';
+import { ClaimFees } from './ClaimFees';
 
 const sdk = vi.hoisted(() => ({
   getPool: vi.fn(),
@@ -85,10 +85,10 @@ function connect(wallet: PublicKey | null) {
   } as unknown as WalletContextState);
 }
 
-function renderClaim(model: Model, Component = ClaimFees) {
+function renderClaim(model: Model) {
   return render(
     <TestProviders>
-      <Component model={model} />
+      <ClaimFees model={model} />
     </TestProviders>,
   );
 }
@@ -121,17 +121,18 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('resolveClaimRole', () => {
-  it('picks creator for the provider, partner for the fee claimer, otherwise none', () => {
-    expect(resolveClaimRole('a', 'a', 'b')).toBe('creator');
-    expect(resolveClaimRole('b', 'a', 'b')).toBe('partner');
-    expect(resolveClaimRole('c', 'a', 'b')).toBeNull();
-    expect(resolveClaimRole('c', 'a', null)).toBeNull();
+describe('resolveClaimRoles', () => {
+  it('picks creator for the provider, partner for the fee claimer, both or none', () => {
+    expect(resolveClaimRoles('a', 'a', 'b')).toEqual(['creator']);
+    expect(resolveClaimRoles('b', 'a', 'b')).toEqual(['partner']);
+    expect(resolveClaimRoles('a', 'a', 'a')).toEqual(['creator', 'partner']);
+    expect(resolveClaimRoles('c', 'a', 'b')).toEqual([]);
+    expect(resolveClaimRoles('c', 'a', null)).toEqual([]);
   });
 });
 
 describe('ClaimFees', () => {
-  it('claims creator trading fees on the curve without touching the fee config', async () => {
+  it('claims creator trading fees on the curve for the provider', async () => {
     const owner = new PublicKey(curveModel.providerWallet);
     connect(owner);
     renderClaim(curveModel);
@@ -145,7 +146,7 @@ describe('ClaimFees', () => {
     expect(params.pool?.toBase58()).toBe(curveModel.token.dbcPool);
     expect(sdk.claimPartnerTradingFee).not.toHaveBeenCalled();
     expect(sdk.claimPositionFee).not.toHaveBeenCalled();
-    expect(sdk.getPoolConfig).not.toHaveBeenCalled();
+    expect(screen.queryByText('Platform')).toBeNull();
   });
 
   it('adds claimPositionFee for each DAMM v2 position once graduated', async () => {
@@ -189,10 +190,28 @@ describe('ClaimFees', () => {
     expect(container.textContent).toBe('');
   });
 
-  it('shows the token page variant to the provider only', () => {
-    connect(TREASURY);
-    const { container } = renderClaim(curveModel, OwnerClaimFees);
+  it('renders nothing and reads nothing without a wallet', () => {
+    connect(null);
+    const { container } = renderClaim(curveModel);
     expect(container.textContent).toBe('');
     expect(sdk.getPool).not.toHaveBeenCalled();
+  });
+
+  it('offers both claims when the provider is also the fee claimer', async () => {
+    const owner = new PublicKey(curveModel.providerWallet);
+    sdk.getPoolConfig.mockResolvedValue({ feeClaimer: owner });
+    connect(owner);
+    renderClaim(curveModel);
+
+    const platform = (await screen.findByText('Platform')).closest('section');
+    const creator = screen.getByText('Creator').closest('section');
+    expect(platform).toBeTruthy();
+    expect(creator).toBeTruthy();
+    fireEvent.click(within(platform as HTMLElement).getByRole('button', { name: 'Claim fees' }));
+    expect(await within(platform as HTMLElement).findByText('Fees claimed:')).toBeTruthy();
+
+    const params = sdk.claimPartnerTradingFee.mock.calls[0]?.[0] as Record<string, PublicKey>;
+    expect(params.feeClaimer?.equals(owner)).toBe(true);
+    expect(sdk.claimCreatorTradingFee).not.toHaveBeenCalled();
   });
 });

@@ -65,23 +65,60 @@ export async function claimSettlement(
 }
 
 /**
+ * Paths `saveIf` saved per settlement in its current transaction. A transaction retried
+ * after a transient commit error re-runs its callback on a document `save()` already
+ * marked clean (KPR-01), so the retry re-marks these paths to write them again.
+ */
+const savedInTransaction = new WeakMap<
+  SettlementDoc,
+  { session: ClientSession; paths: Set<string> }
+>();
+
+function remarkRetriedPaths(settlement: SettlementDoc, session: ClientSession): void {
+  const earlier = savedInTransaction.get(settlement);
+  const paths = new Set(earlier?.session === session ? earlier.paths : []);
+  for (const path of paths) settlement.markModified(path);
+  for (const path of settlement.directModifiedPaths()) paths.add(path);
+  savedInTransaction.set(settlement, { session, paths });
+}
+
+/**
  * Compare-and-set save: writes only if the stored settlement also matches `expected`
  * (stored values, before this save), else throws `SettlementConflictError` and writes nothing.
+ *
+ * With nothing to write, mongoose's `save()` only checks that the `_id` exists and skips
+ * `$where`; the fence and `expected` are then asserted with an explicit fenced update
+ * (it bumps `updatedAt`, so a concurrent writer still conflicts with this transaction).
  */
 export async function saveIf(
   settlement: SettlementDoc,
   expected: Record<string, unknown>,
   session?: ClientSession,
 ): Promise<void> {
+  if (session) remarkRetriedPaths(settlement, session);
   const fenced = settlement.$where;
-  settlement.$where = { ...fenced, ...expected };
+  const where = { ...fenced, ...expected };
+  const conflict = () =>
+    new SettlementConflictError(
+      `settlement ${settlement._id.toHexString()} changed under this runner (${Object.keys(expected).join(', ')})`,
+    );
+
+  if (!settlement.isModified()) {
+    const { matchedCount } = await Settlements.updateOne(
+      { ...where, _id: settlement._id },
+      { $set: { updatedAt: new Date() } },
+      session ? { session } : {},
+    );
+    if (matchedCount !== 1) throw conflict();
+    return;
+  }
+
+  settlement.$where = where;
   try {
     await settlement.save(session ? { session } : {});
   } catch (err) {
     if (!isDocumentNotFound(err)) throw err;
-    throw new SettlementConflictError(
-      `settlement ${settlement._id.toHexString()} changed under this runner (${Object.keys(expected).join(', ')})`,
-    );
+    throw conflict();
   } finally {
     settlement.$where = fenced;
   }

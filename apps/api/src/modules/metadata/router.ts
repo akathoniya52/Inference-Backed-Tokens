@@ -6,7 +6,8 @@ import type { AppContext } from '../../app.js';
 
 const SYMBOL_MAX = 10;
 
-function fallbackSymbol(slug: string): string {
+/** Symbol served for a model prepared without one. */
+export function fallbackSymbol(slug: string): string {
   return (
     slug
       .replace(/[^a-z0-9]/gi, '')

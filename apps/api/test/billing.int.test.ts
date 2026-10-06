@@ -118,11 +118,14 @@ describe('billing', () => {
     expect(await Deposits.countDocuments({ txSignature: sig, status: 'rejected' })).toBe(0);
   });
 
-  it('an unknown signature is rejected, and a later finalized tx still credits', async () => {
+  it('an unknown signature is retryable, never recorded, and a later finalized tx credits (API-09)', async () => {
     const sig = newSignature();
+    const alertsBefore = t.alerter.alerts.length;
     const missing = await deposit(sig);
-    expect(missing.status).toBe(422);
-    expect(await Deposits.countDocuments({ txSignature: sig, status: 'rejected' })).toBe(1);
+    expect(missing.status).toBe(202);
+    expect(errorOf(missing).code).toBe('deposit_pending');
+    expect(await Deposits.countDocuments({ txSignature: sig })).toBe(0);
+    expect(t.alerter.alerts.length).toBe(alertsBefore);
 
     t.chain.setParsedTx(sig, depositTx(sig, depositRef));
     expect((await deposit(sig)).status).toBe(200);
@@ -260,5 +263,16 @@ describe('billing', () => {
       .query({ from: '2026-09-03', to: '2026-09-01' })
       .set('Authorization', bearer(jwt));
     expect(inverted.status).toBe(400);
+
+    // API-11: a date-only `to` covers its whole day, so a same-day range is valid.
+    const sameDay = await request(t.app)
+      .get('/api/billing/usage')
+      .query({ from: '2026-09-01T12:00:00Z', to: '2026-09-01' })
+      .set('Authorization', bearer(jwt));
+    expect(sameDay.status).toBe(200);
+    expect(UsageResponseSchema.parse(sameDay.body)).toMatchObject({
+      from: '2026-09-01T12:00:00.000Z',
+      to: '2026-09-02T00:00:00.000Z',
+    });
   });
 });

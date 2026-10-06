@@ -1,5 +1,5 @@
 import { CreateApiKeyRequestSchema, type ApiKey, type CreateApiKeyResponse } from '@ibt/shared';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 
 import { useApiKeys, useCreateApiKey, useRevokeApiKey } from '../hooks/useAccount';
 
@@ -14,13 +14,65 @@ function formatDate(iso: string | null): string {
   return iso === null ? 'Never' : iso.slice(0, 10);
 }
 
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** Keeps Tab and Shift+Tab inside `container`, as a modal dialog must. */
+function trapFocus(event: KeyboardEvent<HTMLElement>, container: HTMLElement | null) {
+  if (event.key !== 'Tab' || container === null) return;
+  const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE));
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (first === undefined || last === undefined) return;
+  const active = document.activeElement;
+  if (event.shiftKey && (active === first || !container.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || !container.contains(active))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+/**
+ * The key exists only in this dialog: Escape asks before closing, a reload or
+ * tab close triggers the browser's leave-page warning, and focus stays inside.
+ */
 function NewKeyDialog({ created, onDone }: { created: CreateApiKeyResponse; onDone: () => void }) {
   const [copy, setCopy] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [confirmClose, setConfirmClose] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const doneRef = useRef<HTMLButtonElement>(null);
+  const keepRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     doneRef.current?.focus();
+    return () => opener?.focus();
   }, []);
+
+  useEffect(() => {
+    if (confirmClose) keepRef.current?.focus();
+  }, [confirmClose]);
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      // Older browsers only show the prompt when returnValue is set.
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, []);
+
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setConfirmClose(true);
+      return;
+    }
+    trapFocus(event, dialogRef.current);
+  }
 
   async function copyKey() {
     try {
@@ -34,16 +86,19 @@ function NewKeyDialog({ created, onDone }: { created: CreateApiKeyResponse; onDo
   return (
     <div className="fixed inset-0 z-30 grid place-items-center bg-ink-950/80 p-4 backdrop-blur-sm">
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-key-title"
+        aria-describedby="new-key-description"
         className="w-full max-w-lg rounded-sm border border-ink-800 bg-ink-900 p-6"
+        onKeyDown={onKeyDown}
       >
         <p className="font-mono text-xs uppercase tracking-label text-accent">Shown once</p>
         <h3 id="new-key-title" className="mt-2 text-lg font-semibold text-ink-50">
           Key “{created.name}” created
         </h3>
-        <p className="mt-2 text-sm text-ink-400">
+        <p id="new-key-description" className="mt-2 text-sm text-ink-400">
           Copy it now. Only a hash is stored, so this key cannot be shown again.
         </p>
         <code
@@ -52,18 +107,47 @@ function NewKeyDialog({ created, onDone }: { created: CreateApiKeyResponse; onDo
         >
           {created.key}
         </code>
-        <div className="mt-5 flex items-center gap-3">
-          <button type="button" className={GHOST_BUTTON} onClick={() => void copyKey()}>
-            {copy === 'copied'
-              ? 'Copied'
-              : copy === 'failed'
-                ? 'Copy failed, select it'
-                : 'Copy key'}
-          </button>
-          <button ref={doneRef} type="button" className={PRIMARY_BUTTON} onClick={onDone}>
-            I have saved it
-          </button>
-        </div>
+        {confirmClose ? (
+          <div
+            role="alert"
+            className="mt-5 rounded-sm border border-negative/40 bg-negative/10 p-4"
+          >
+            <p className="text-sm text-ink-50">
+              Close without saving? The key cannot be shown again; you would have to create a new
+              one.
+            </p>
+            <div className="mt-3 flex items-center gap-3">
+              <button
+                ref={keepRef}
+                type="button"
+                className={GHOST_BUTTON}
+                onClick={() => setConfirmClose(false)}
+              >
+                Keep it open
+              </button>
+              <button
+                type="button"
+                className={`${GHOST_BUTTON} border-negative/60 text-negative`}
+                onClick={onDone}
+              >
+                Close anyway
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-5 flex items-center gap-3">
+            <button type="button" className={GHOST_BUTTON} onClick={() => void copyKey()}>
+              {copy === 'copied'
+                ? 'Copied'
+                : copy === 'failed'
+                  ? 'Copy failed, select it'
+                  : 'Copy key'}
+            </button>
+            <button ref={doneRef} type="button" className={PRIMARY_BUTTON} onClick={onDone}>
+              I have saved it
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

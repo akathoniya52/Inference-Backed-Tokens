@@ -1,8 +1,9 @@
 import type { SendOpts, TxResult } from '@ibt/chain';
-import type { SettlementDoc } from '@ibt/db';
+import { Settlements, type SettlementDoc } from '@ibt/db';
+import { AppError } from '@ibt/shared';
 
 import type { KeeperCtx } from '../ctx.js';
-import { assertLeaseHeld, saveIf } from './fence.js';
+import { SettlementConflictError, assertLeaseHeld, saveIf } from './fence.js';
 
 /** `pendingTx.step` is `<settlement step>:<chain step>`, e.g. `payProvider:payout`, `buyAndLock:lock`. */
 export const pendingStepKey = (step: string, chainStep: string) => `${step}:${chainStep}`;
@@ -38,10 +39,10 @@ async function clearPendingTx(settlement: SettlementDoc, signature: string): Pro
   await saveIf(settlement, { 'pendingTx.signature': signature });
 }
 
-type StoredPendingTx = NonNullable<SettlementDoc['pendingTx']>;
+type StoredPendingTx = PriorTx;
 
 /**
- * Polls a stored tx until it `landed`, or is `dropped`: it failed, or its blockhash expired
+ * Polls a stored tx until it `landed` (confirmed or finalized), or is `dropped`: it failed, or its blockhash expired
  * and the finalized re-check (E4) finds it absent from history. An expired tx the re-check
  * cannot place stays stored and throws `PendingTxUnknownError` (alerted); one that can still
  * land throws `PendingTxUnresolvedError`.
@@ -56,6 +57,8 @@ export async function pendingTxOutcome(
     const status = await ctx.chain.signatureStatus(pending.signature);
     if (status === 'landed') return 'landed';
     if (status === 'failed') return 'dropped';
+    // `pending` (processed only) and `unknown` are not landed: a fork can still drop a
+    // processed tx (KPR-05). Past its blockhash, the finalized re-check decides.
     if ((await ctx.blockHeight()) > pending.lastValidBlockHeight) {
       const final = await ctx.chain.expiredSignatureStatus(
         pending.signature,
@@ -77,8 +80,66 @@ export async function pendingTxOutcome(
 }
 
 /**
- * G20 resume check for `step`. Resolves to the landed signature, or `null` once the
- * stored tx failed or its blockhash expired (pendingTx cleared, caller rebuilds).
+ * Signatures `onSigned` replaced (CHN-01): a send re-signed after its earlier tx was
+ * judged dead. Kept in `pendingTxHistory` (written with `strict: false`, outside the
+ * schema) so a resume resolves every one of them before anything is sent again.
+ */
+interface PriorTx {
+  step: string;
+  signature: string;
+  lastValidBlockHeight: number;
+}
+
+const isPriorTx = (v: unknown): v is PriorTx =>
+  typeof v === 'object' &&
+  v !== null &&
+  'step' in v &&
+  typeof v.step === 'string' &&
+  'signature' in v &&
+  typeof v.signature === 'string' &&
+  'lastValidBlockHeight' in v &&
+  typeof v.lastValidBlockHeight === 'number';
+
+async function priorTxs(settlement: SettlementDoc): Promise<PriorTx[]> {
+  const raw = await Settlements.collection.findOne(
+    { _id: settlement._id },
+    { projection: { pendingTxHistory: 1 } },
+  );
+  const list: unknown = raw?.pendingTxHistory;
+  return Array.isArray(list) ? list.filter(isPriorTx) : [];
+}
+
+/** Adds `prior` to the history, fenced to the settlement's lease epoch. */
+async function recordPriorTx(settlement: SettlementDoc, prior: PriorTx): Promise<void> {
+  const { matchedCount } = await Settlements.updateOne(
+    { _id: settlement._id, leaseEpoch: settlement.leaseEpoch ?? null },
+    { $addToSet: { pendingTxHistory: prior } },
+    { strict: false },
+  );
+  if (matchedCount !== 1) {
+    throw new SettlementConflictError('settlement was claimed by a newer lease epoch');
+  }
+}
+
+const matchesStep = (key: string, step: string, chainSteps?: readonly string[]): boolean =>
+  pendingStepOf(key) === step && (!chainSteps || chainSteps.includes(pendingChainStepOf(key)));
+
+/** The signatures `step` signed and then replaced (`pendingTxHistory`), oldest first. */
+export async function priorSignatures(
+  settlement: SettlementDoc,
+  step: string,
+  chainSteps?: readonly string[],
+): Promise<string[]> {
+  return (await priorTxs(settlement))
+    .filter((prior) => matchesStep(prior.step, step, chainSteps))
+    .map((prior) => prior.signature);
+}
+
+/**
+ * G20 resume check for `step`. Every signature this step ever signed (the stored
+ * `pendingTx` and the ones it replaced) is resolved first: one still in flight throws, so
+ * nothing is re-sent while it may land. Resolves to the landed signature, or `null` once
+ * all of them failed or expired (pendingTx cleared, caller rebuilds).
  * `chainSteps` also pins the chain step, for settlement steps that send several txs.
  */
 export async function resolvePendingTx(
@@ -88,14 +149,27 @@ export async function resolvePendingTx(
   chainSteps?: readonly string[],
 ): Promise<string | null> {
   const pending = settlement.pendingTx;
-  if (!pending) return null;
-  if (
-    pendingStepOf(pending.step) !== step ||
-    (chainSteps && !chainSteps.includes(pendingChainStepOf(pending.step)))
-  ) {
+  if (pending && !matchesStep(pending.step, step, chainSteps)) {
     throw new Error(`pendingTx belongs to ${pending.step}, not ${step}`);
   }
-  if ((await pendingTxOutcome(ctx, pending)) === 'landed') return pending.signature;
+  const priors = (await priorTxs(settlement)).filter(
+    (prior) => matchesStep(prior.step, step, chainSteps) && prior.signature !== pending?.signature,
+  );
+  const candidates: PriorTx[] = pending ? [...priors, pending] : priors;
+  const landed: string[] = [];
+  for (const candidate of candidates) {
+    if ((await pendingTxOutcome(ctx, candidate)) === 'landed') landed.push(candidate.signature);
+  }
+  if (landed.length > 1) {
+    await ctx.alerter.alert('error', 'more than one tx landed for one settlement step', {
+      settlementId: settlement._id.toHexString(),
+      step,
+      signatures: landed,
+    });
+  }
+  const first = landed[0];
+  if (first) return first;
+  if (!pending) return null;
   ctx.logger.warn({ step: pending.step, signature: pending.signature }, 'rebuild tx');
   await clearPendingTx(settlement, pending.signature);
   return null;
@@ -126,23 +200,50 @@ export async function sendWithPendingTx<T extends TxResult>(
   const landed = await resolvePendingTx(ctx, settlement, step, chainSteps);
   if (landed) return { signature: landed, result: null };
 
-  let ownSignature: string | null = null;
-  const result = await send({
-    settlementRef: settlement._id.toHexString(),
-    onSigned: async (signature, lastValidBlockHeight, chainStep) => {
-      assertLeaseHeld(ctx, settlement);
-      const expected = {
-        lastCompletedState: settlement.lastCompletedState,
-        ...(ownSignature ? { 'pendingTx.signature': ownSignature } : { pendingTx: null }),
-      };
-      settlement.pendingTx = {
-        step: pendingStepKey(step, chainStep),
-        signature,
-        lastValidBlockHeight,
-      };
-      await saveIf(settlement, expected);
-      ownSignature = signature;
-    },
-  });
-  return { signature: result.signature, result };
+  let own: PriorTx | null = null;
+  try {
+    const result = await send({
+      settlementRef: settlement._id.toHexString(),
+      onSigned: async (signature, lastValidBlockHeight, chainStep) => {
+        assertLeaseHeld(ctx, settlement);
+        const prior = own;
+        const expected = {
+          lastCompletedState: settlement.lastCompletedState,
+          ...(prior ? { 'pendingTx.signature': prior.signature } : { pendingTx: null }),
+        };
+        const next = { step: pendingStepKey(step, chainStep), signature, lastValidBlockHeight };
+        // A replaced signature is kept, never dropped: a resume resolves it before resending.
+        if (prior && prior.step === next.step) await recordPriorTx(settlement, prior);
+        settlement.pendingTx = next;
+        await saveIf(settlement, expected);
+        own = next;
+      },
+    });
+    return { signature: result.signature, result };
+  } catch (err) {
+    await keepUnresolvedSignature(settlement, own, err);
+    throw err;
+  }
+}
+
+/**
+ * `chain_send_failed` names the signature whose outcome is unknown. It is the stored
+ * `pendingTx` (persisted before the send), and the next attempt resolves it instead of
+ * re-sending; any other signature is added to the history so it is resolved too.
+ */
+async function keepUnresolvedSignature(
+  settlement: SettlementDoc,
+  own: PriorTx | null,
+  err: unknown,
+): Promise<void> {
+  if (!(err instanceof AppError) || err.code !== 'chain_send_failed' || !own) return;
+  const details: unknown = err.details;
+  if (typeof details !== 'object' || details === null || !('signature' in details)) return;
+  const { signature } = details;
+  if (typeof signature !== 'string' || signature === own.signature) return;
+  const lastValidBlockHeight =
+    'lastValidBlockHeight' in details && typeof details.lastValidBlockHeight === 'number'
+      ? details.lastValidBlockHeight
+      : own.lastValidBlockHeight;
+  await recordPriorTx(settlement, { step: own.step, signature, lastValidBlockHeight });
 }

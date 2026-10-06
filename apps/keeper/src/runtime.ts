@@ -1,4 +1,9 @@
-import { JupiterPriceSource, type PriceSource, RealChainClient } from '@ibt/chain';
+import {
+  JUPITER_TIMEOUT_MS,
+  JupiterPriceSource,
+  type PriceSource,
+  RealChainClient,
+} from '@ibt/chain';
 import {
   createFakeChain,
   type FakeChainMongo,
@@ -103,9 +108,12 @@ export function buildKeeperCtx(
     ...(env.RPC_URL_FALLBACK ? { fallbackUrl: env.RPC_URL_FALLBACK } : {}),
     usdcMint: new PublicKey(env.USDC_MINT),
   });
+  // A quote must be recent against the cluster's slot, and a hung request times out (CHN-06).
   const price = new JupiterPriceSource({
     url: env.JUPITER_PRICE_URL,
     ...(env.JUPITER_API_KEY ? { apiKey: env.JUPITER_API_KEY } : {}),
+    timeoutMs: JUPITER_TIMEOUT_MS,
+    currentSlot: () => chain.rpc.withRetry((conn) => conn.getSlot('confirmed')),
   });
   return { ...base, chain, price, blockHeight: () => chain.rpc.read.getBlockHeight() };
 }

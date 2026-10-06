@@ -10,7 +10,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApiAlerts } from '../src/alerts.js';
 import { createUpstreamAgent } from '../src/lib/upstreamAgent.js';
 import { runAllHealthChecks } from '../src/modules/admin/service.js';
-import { runHealthCheck } from '../src/modules/models/health.js';
+import {
+  LATENCY_MAX_MODELS,
+  recordLatency,
+  runHealthCheck,
+  trackedLatencyModels,
+} from '../src/modules/models/health.js';
 import { HEALTH_CHECK_LIMIT_PER_MIN } from '../src/modules/models/router.js';
 import { bearer, errorOf, makeTestApp, newWallet, signIn, type TestApp } from './helpers.js';
 
@@ -202,6 +207,33 @@ describe('model health check', () => {
     });
     expect(JSON.stringify(newAlerts)).not.toContain(UPSTREAM_KEY);
     expect(texts.join('\n')).not.toContain('internal upstream detail');
+
+    // API-02: the owner cannot resume a health pause while the upstream still fails...
+    expect((await Models.findById(modelId).lean())?.pausedBy).toBe('health');
+    const resume = () =>
+      request(t.app)
+        .patch(`/api/models/${modelId}`)
+        .set('Authorization', bearer(owner))
+        .send({ status: 'active' });
+    const refused = await resume();
+    expect(refused.status).toBe(403);
+    expect((await Models.findById(modelId).lean())?.status).toBe('paused');
+    // ...only after a passing health check.
+    upstream.mode = 'ok';
+    expect(HealthCheckResponseSchema.parse((await check()).body)).toMatchObject({ ok: true });
+    expect((await resume()).status).toBe(200);
+    expect(await Models.findById(modelId).lean()).toMatchObject({
+      status: 'active',
+      pausedBy: null,
+    });
+  });
+
+  it('keeps latency samples for a bounded number of models, oldest out first (API-16)', () => {
+    for (let i = 0; i <= LATENCY_MAX_MODELS + 50; i += 1) recordLatency(`model-${i}`, i);
+    expect(trackedLatencyModels()).toBe(LATENCY_MAX_MODELS);
+    // A model checked again moves to the back and keeps its samples.
+    expect(recordLatency(`model-${LATENCY_MAX_MODELS + 50}`, 0)).toBe(0);
+    expect(trackedLatencyModels()).toBe(LATENCY_MAX_MODELS);
   });
 
   it('does not follow upstream redirects', async () => {

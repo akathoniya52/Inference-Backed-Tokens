@@ -6,6 +6,11 @@ packages:
 overrides:
   '@solana/web3.js': ^1.99.0
   vite: ~5.4.21
+  # DEP-01: jayson 5 drops stream-json (<3.6.0 prototype pollution, DoS) and uuid; the
+  # browser client @solana/web3.js uses is unchanged.
+  jayson: ^5.0.0
+  'uuid@<11.1.1': ^11.1.1
+  'toml@<4.2.0': ^4.3.0
 
 # Keep workspace packages as plain symlinks. Injected copies (the default when peer
 # sets differ) gave api a stale copy of @ibt/chain and keeper a stale copy of @ibt/db,

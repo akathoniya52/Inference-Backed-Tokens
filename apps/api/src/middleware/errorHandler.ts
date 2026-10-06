@@ -2,7 +2,7 @@ import { AppError, isAppError } from '@ibt/shared';
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 import type { Logger } from 'pino';
 
-import { getRequestId } from '../context.js';
+import { getCorrelationId } from '../context.js';
 
 interface HttpParserError {
   type: string;
@@ -39,14 +39,19 @@ export function notFound(): RequestHandler {
 }
 
 /** Envelope `{error:{code,message,requestId}}` (L260); never a stack or internal message. */
-export function errorHandler(logger: Logger): ErrorRequestHandler {
+export function errorHandler(
+  logger: Logger,
+  /** API-12: an error after the headers still counts toward the 5xx alert. */
+  onErrorAfterHeaders?: (res: object) => void,
+): ErrorRequestHandler {
   return (err: unknown, req, res, _next) => {
     const appError = toAppError(err);
-    const requestId = getRequestId(req);
+    const requestId = getCorrelationId(req);
     if (appError.httpStatus >= 500) {
       logger.error({ err, requestId, route: req.path }, 'request failed');
     }
     if (res.headersSent) {
+      onErrorAfterHeaders?.(res);
       res.destroy();
       return;
     }

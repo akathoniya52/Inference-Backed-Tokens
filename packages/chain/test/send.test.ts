@@ -171,11 +171,134 @@ describe('sendAndConfirm', () => {
       `onSigned:${first?.signature}:${bh1?.lastValidBlockHeight}`,
       `sendRawTransaction:${first?.signature}`,
       `confirmTransaction:${first?.signature}`,
+      'getBlockHeight',
       'getSignatureStatuses',
+      'getMinimumLedgerSlot',
       `onSigned:${second?.signature}:${bh2?.lastValidBlockHeight}`,
       `sendRawTransaction:${second?.signature}`,
       `confirmTransaction:${second?.signature}`,
     ]);
+  });
+
+  describe('after a blockhash expiry (CHN-01)', () => {
+    const fast = { expiryChecks: 3, expiryCheckMs: 0 };
+
+    async function unresolved(connection: FakeConnection, buildTx = vi.fn(transferTx)) {
+      const err = await sendAndConfirm({
+        connection,
+        buildTx,
+        signers: [payer],
+        commitment: 'confirmed',
+        ...fast,
+      }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(AppError);
+      expect(err).toMatchObject({
+        code: 'chain_send_failed',
+        details: {
+          signature: connection.sent[0]?.signature,
+          lastValidBlockHeight: connection.blockhashes[0]?.lastValidBlockHeight,
+        },
+      });
+      expect(buildTx).toHaveBeenCalledTimes(1);
+      expect(connection.count('sendRawTransaction')).toBe(1);
+      return err;
+    }
+
+    it('never re-signs while the status is only processed', async () => {
+      const connection = new FakeConnection();
+      connection.queueConfirm('expired-processed');
+      await unresolved(connection);
+      expect(connection.count('getSignatureStatuses')).toBe(fast.expiryChecks);
+    });
+
+    it('never re-signs while the expiry is not finalized, polling a bounded number of times', async () => {
+      const connection = new FakeConnection();
+      connection.finalizedHeight = 0;
+      connection.queueConfirm('expired');
+      await unresolved(connection);
+      expect(connection.count('getBlockHeight')).toBe(fast.expiryChecks);
+      expect(connection.count('getSignatureStatuses')).toBe(0);
+    });
+
+    it('never re-signs when the node history does not cover the validity window', async () => {
+      const connection = new FakeConnection();
+      connection.minimumLedgerSlot = Number.MAX_SAFE_INTEGER;
+      connection.queueConfirm('expired');
+      await unresolved(connection);
+    });
+
+    it('never re-signs on a status that is confirmed but not finalized', async () => {
+      const connection = new FakeConnection();
+      connection.statusCommitment = 'confirmed';
+      connection.queueConfirm('expired-landed');
+      await unresolved(connection);
+    });
+
+    it('returns the expired signature once it is finalized as landed', async () => {
+      const connection = new FakeConnection();
+      connection.queueConfirm('expired-landed');
+      const result = await sendAndConfirm({
+        connection,
+        tx: transferTx(),
+        signers: [payer],
+        commitment: 'confirmed',
+        ...fast,
+      });
+      expect(result).toEqual({
+        signature: connection.sent[0]?.signature,
+        landed: true,
+        attempts: 1,
+      });
+    });
+
+    it('does not resend a fixed tx that expired after failing on-chain', async () => {
+      const connection = new FakeConnection();
+      connection.queueConfirm('expired-failed');
+      const err = await sendAndConfirm({
+        connection,
+        tx: transferTx(),
+        signers: [payer],
+        commitment: 'confirmed',
+        ...fast,
+      }).catch((e: unknown) => e);
+      expect(err).toMatchObject({
+        code: 'chain_send_failed',
+        details: { signature: connection.sent[0]?.signature, landed: true },
+      });
+      expect(connection.count('sendRawTransaction')).toBe(1);
+    });
+  });
+
+  describe('after an on-chain error (CHN-04)', () => {
+    it('does not resend an identical fixed tx', async () => {
+      const connection = new FakeConnection();
+      connection.queueConfirm('failed', 'confirmed');
+      const err = await sendAndConfirm({
+        connection,
+        tx: transferTx(),
+        signers: [payer],
+        commitment: 'confirmed',
+      }).catch((e: unknown) => e);
+      expect(err).toMatchObject({
+        code: 'chain_send_failed',
+        details: { signature: connection.sent[0]?.signature, landed: true },
+      });
+      expect(connection.count('sendRawTransaction')).toBe(1);
+    });
+
+    it('rebuilds through buildTx and retries', async () => {
+      const connection = new FakeConnection();
+      connection.queueConfirm('failed', 'confirmed');
+      const buildTx = vi.fn(transferTx);
+      const result = await sendAndConfirm({
+        connection,
+        buildTx,
+        signers: [payer],
+        commitment: 'confirmed',
+      });
+      expect(result.attempts).toBe(2);
+      expect(buildTx).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('sends nothing when onSigned throws', async () => {

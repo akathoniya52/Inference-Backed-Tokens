@@ -93,4 +93,37 @@ describe('ProviderPage', () => {
       status: 'paused',
     });
   });
+
+  it('links a registered but unlaunched model to "Continue launch" (WEB-03)', async () => {
+    mockProviderApi();
+    renderRoute('/provider');
+
+    const links = await screen.findAllByRole('link', {
+      name: `Continue launch of ${unlaunchedModel.name}`,
+    });
+    expect(links).toHaveLength(1);
+    expect(links[0]?.getAttribute('href')).toBe(`/launch?model=${unlaunchedModel.slug}`);
+    expect(
+      screen.queryByRole('link', { name: `Continue launch of ${curveModel.name}` }),
+    ).toBeNull();
+  });
+
+  it('opens the launch wizard on the launch step for ?model=<slug> (WEB-03)', async () => {
+    const fetchSpy = mockProviderApi();
+    renderRoute(`/launch?model=${unlaunchedModel.slug}`);
+
+    expect(await screen.findByRole('heading', { name: 'Launch the token' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Register your endpoint' })).toBeNull();
+    expect(fetchSpy.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+  });
+
+  it('offers to continue an unlaunched model from a fresh wizard (WEB-03)', async () => {
+    mockProviderApi();
+    renderRoute('/launch');
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: `Continue launch of ${unlaunchedModel.name}` }),
+    );
+    expect(await screen.findByRole('heading', { name: 'Launch the token' })).toBeTruthy();
+  });
 });

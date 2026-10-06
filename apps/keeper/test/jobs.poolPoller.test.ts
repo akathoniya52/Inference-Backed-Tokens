@@ -1,7 +1,7 @@
 import { deriveDammPool } from '@ibt/chain';
 import { Models, PoolSnapshots } from '@ibt/db';
 import type { PublicKey } from '@solana/web3.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { createPoolPoller } from '../src/jobs/poolPoller.js';
 import { createTestModel, makeKeeperCtx, type TestKeeperCtx } from './helpers.js';
@@ -97,5 +97,26 @@ describe('poolPoller + migrationCrank', () => {
     await poller.tick();
     expect((await Models.findById(model._id).lean())?.token.status).toBe('graduated');
     expect(migrateCalls(pool)).toBe(2);
+  });
+
+  it('a migration signature stored while the poller signs aborts its send', async () => {
+    const { model, pool } = await createTestModel(ctx, 'curve');
+    if (!pool) throw new Error('pool expected');
+    await completeCurve(pool);
+    const poller = createPoolPoller(ctx);
+    const migrate = ctx.chain.migrate.bind(ctx.chain);
+    vi.spyOn(ctx.chain, 'migrate').mockImplementationOnce(async (keeper, address, opts) => {
+      await Models.updateOne(
+        { _id: model._id },
+        { $set: { 'token.migrationSignature': 'sigSettlementMigrate' } },
+      );
+      return migrate(keeper, address, opts);
+    });
+
+    await poller.tick();
+    expect(await ctx.chain.landedTxs({ method: 'migrate', to: pool.toBase58() })).toHaveLength(0);
+    expect((await Models.findById(model._id).lean())?.token.migrationSignature).toBe(
+      'sigSettlementMigrate',
+    );
   });
 });

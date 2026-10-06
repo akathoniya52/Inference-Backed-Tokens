@@ -229,7 +229,15 @@ describe('settlement engine and orchestrator', () => {
     await addRequest(model._id, micro(10), at(0));
     const outcomes = await createOrchestrator(ctx).run(periodFromStart(at(0)));
     const mine = outcomes.filter((o) => o.model === model.slug);
-    expect(mine.map((o) => ('settlement' in o ? o.resumed : null))).toEqual([true, false]);
+    // The resumed period runs first; then every missed hour up to at(0) is opened (KPR-08).
+    expect(mine.map((o) => ('settlement' in o ? o.resumed : null))).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
     expect((await reload(doc)).state).toBe('done');
     const fresh = await Settlements.findOne({ modelId: model._id, periodStart: at(0) });
     expect(fresh?.state).toBe('done');

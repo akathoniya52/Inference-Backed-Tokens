@@ -1,4 +1,11 @@
-import { Settlements, Users, recomputeBalance, withTransaction } from '@ibt/db';
+import {
+  Settlements,
+  Users,
+  recomputeBalance,
+  recomputeHeld,
+  withTransaction,
+  type Types,
+} from '@ibt/db';
 import { microToUsdcString } from '@ibt/shared';
 
 import type { KeeperCtx } from '../ctx.js';
@@ -7,6 +14,8 @@ const WINDOW_MS = 48 * 3_600_000;
 
 export interface BalanceDrift {
   userId: string;
+  /** `balance` (deposits + adjustments − captures) or `held` (open hold estimates). */
+  field: 'balance' | 'held';
   cachedMicroUsdc: bigint;
   ledgerMicroUsdc: bigint;
   fixed: boolean;
@@ -57,34 +66,73 @@ interface SettlementRow {
 export function createReconcileJob(ctx: Pick<KeeperCtx, 'chain' | 'clock' | 'logger' | 'alerter'>) {
   const log = ctx.logger.child({ job: 'reconcile' });
 
+  /**
+   * One user's cached balance and held amount against the ledger, all read in one
+   * transaction snapshot (KPR-07), so a capture or deposit committing meanwhile cannot
+   * show up as drift. Drift is fixed in the same transaction; a write conflict with live
+   * traffic retries it on a fresh snapshot.
+   */
+  async function reconcileUser(userId: Types.ObjectId): Promise<BalanceDrift[]> {
+    return withTransaction(async (session) => {
+      const user = await Users.findById(userId, { balanceMicroUsdc: 1, heldMicroUsdc: 1 })
+        .session(session)
+        .lean();
+      if (!user) return [];
+      const balance = await recomputeBalance(userId, { session });
+      const held = await recomputeHeld(userId, { session });
+      const rows: BalanceDrift[] = [];
+      const set: Record<string, bigint> = {};
+      if (balance !== user.balanceMicroUsdc) {
+        set.balanceMicroUsdc = balance;
+        rows.push({
+          userId: userId.toHexString(),
+          field: 'balance',
+          cachedMicroUsdc: user.balanceMicroUsdc,
+          ledgerMicroUsdc: balance,
+          fixed: true,
+        });
+      }
+      if (held !== user.heldMicroUsdc) {
+        set.heldMicroUsdc = held;
+        rows.push({
+          userId: userId.toHexString(),
+          field: 'held',
+          cachedMicroUsdc: user.heldMicroUsdc,
+          ledgerMicroUsdc: held,
+          fixed: true,
+        });
+      }
+      if (rows.length > 0) {
+        await Users.updateOne(
+          {
+            _id: userId,
+            balanceMicroUsdc: user.balanceMicroUsdc,
+            heldMicroUsdc: user.heldMicroUsdc,
+          },
+          { $set: set },
+          { session },
+        );
+      }
+      return rows;
+    });
+  }
+
   async function reconcileBalances(): Promise<{ checked: number; drift: BalanceDrift[] }> {
-    const users = await Users.find({}, { balanceMicroUsdc: 1 }).lean();
+    const users = await Users.find({}, { _id: 1 }).lean();
     const drift: BalanceDrift[] = [];
     for (const user of users) {
-      const ledger = await recomputeBalance(user._id);
-      if (ledger === user.balanceMicroUsdc) continue;
-      const { modifiedCount } = await withTransaction((session) =>
-        Users.updateOne(
-          { _id: user._id, balanceMicroUsdc: user.balanceMicroUsdc },
-          { $set: { balanceMicroUsdc: ledger } },
-          { session },
-        ),
-      );
-      const row: BalanceDrift = {
-        userId: user._id.toHexString(),
-        cachedMicroUsdc: user.balanceMicroUsdc,
-        ledgerMicroUsdc: ledger,
-        fixed: modifiedCount === 1,
-      };
-      drift.push(row);
-      const body = {
-        userId: row.userId,
-        cachedUsdc: microToUsdcString(row.cachedMicroUsdc),
-        ledgerUsdc: microToUsdcString(row.ledgerMicroUsdc),
-        fixed: row.fixed,
-      };
-      log.warn(body, 'balance drift');
-      await ctx.alerter.alert('warn', 'balance drift', body);
+      for (const row of await reconcileUser(user._id)) {
+        drift.push(row);
+        const body = {
+          userId: row.userId,
+          field: row.field,
+          cachedUsdc: microToUsdcString(row.cachedMicroUsdc),
+          ledgerUsdc: microToUsdcString(row.ledgerMicroUsdc),
+          fixed: row.fixed,
+        };
+        log.warn(body, `${row.field} drift`);
+        await ctx.alerter.alert('warn', `${row.field} drift`, body);
+      }
     }
     return { checked: users.length, drift };
   }

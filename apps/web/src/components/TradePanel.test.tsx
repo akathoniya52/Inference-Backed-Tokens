@@ -198,7 +198,7 @@ describe('TradePanel', () => {
     expect(screen.getByText(/0\.01 SOL/)).toBeTruthy();
   });
 
-  it('quotes a graduated sell with cp-amm getQuote2 and slippage in percent', async () => {
+  it('quotes a graduated sell with cp-amm getQuote2 and slippage in bps', async () => {
     const mint = new PublicKey(GRADUATED_MINT);
     sdk.fetchPoolState.mockResolvedValue(dammPool());
     sdk.getQuote2.mockReturnValue(dammQuote(2_500_000_000n, 2_425_000_000n));
@@ -213,7 +213,8 @@ describe('TradePanel', () => {
     expect(quoteRow('Price impact')).toBe('0.85%');
 
     const params = sdk.getQuote2.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-    expect(params.slippage).toBe(3);
+    // cp-amm's getAmountWithSlippage divides by 10_000, so 3% must arrive as 300.
+    expect(params.slippage).toBe(300);
     expect((params.inputTokenMint as PublicKey).equals(mint)).toBe(true);
     expect(String(params.amountIn)).toBe('1000000000');
     expect(sdk.swapQuote2).not.toHaveBeenCalled();

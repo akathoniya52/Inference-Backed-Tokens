@@ -85,6 +85,22 @@ describe('parseDeposit', () => {
     expect(parseDeposit(tx, expected)).toEqual({ ok: false, reason: 'wrong_mint' });
   });
 
+  it('rejects an inner transfer whose authority did not sign the tx (CHN-08)', () => {
+    const tx = loadDepositFixture('deposit-transfer-inner', (raw) => {
+      const ix = raw.meta.innerInstructions
+        .flatMap((g) => g.instructions)
+        .find((i) => i.program === 'spl-token');
+      transferInfo(ix).authority = OTHER_ATA;
+    });
+    expect(parseDeposit(tx, expected)).toEqual({ ok: false, reason: 'unsigned_transfer' });
+  });
+
+  it('rejects a deposit once its sender is not a signer (CHN-08)', () => {
+    const tx = loadDepositFixture('deposit-transfer-checked');
+    for (const key of tx.transaction.message.accountKeys) key.signer = false;
+    expect(parseDeposit(tx, expected)).toEqual({ ok: false, reason: 'unsigned_transfer' });
+  });
+
   it('rejects a transfer to another destination', () => {
     const tx = loadDepositFixture('deposit-transfer-checked');
     expect(parseDeposit(tx, { ...expected, treasuryAta: new PublicKey(OTHER_ATA) })).toEqual({

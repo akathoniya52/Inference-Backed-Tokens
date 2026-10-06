@@ -140,8 +140,8 @@ async function quoteGraduated(
   const currentPoint = await getDammCurrentPoint(connection, state.activationType);
   const quote = client.getQuote2({
     inputTokenMint: inputMint(request.side, target.mint),
-    // cp-amm takes slippage in percent.
-    slippage: request.slippageBps / 100,
+    // cp-amm applies `amount * (10000 - slippage) / 10000`, so slippage is in bps.
+    slippage: request.slippageBps,
     currentPoint,
     poolState: state,
     tokenADecimal: decimalsOf(state.tokenAMint),

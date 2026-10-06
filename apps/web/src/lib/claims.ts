@@ -8,14 +8,16 @@ import { Transaction, type Connection, type PublicKey } from '@solana/web3.js';
 
 export type ClaimRole = 'creator' | 'partner';
 
-export function resolveClaimRole(
+/** Every role `wallet` holds on the pool; the treasury can be both provider and fee claimer. */
+export function resolveClaimRoles(
   wallet: string,
   providerWallet: string,
   feeClaimer: string | null,
-): ClaimRole | null {
-  if (wallet === providerWallet) return 'creator';
-  if (feeClaimer !== null && wallet === feeClaimer) return 'partner';
-  return null;
+): ClaimRole[] {
+  const roles: ClaimRole[] = [];
+  if (wallet === providerWallet) roles.push('creator');
+  if (feeClaimer !== null && wallet === feeClaimer) roles.push('partner');
+  return roles;
 }
 
 export async function fetchFeeClaimer(

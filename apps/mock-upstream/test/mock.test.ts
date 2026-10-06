@@ -102,6 +102,28 @@ describe('@ibt/mock-upstream', () => {
     expect(mock.calls[0]?.body).toEqual(BODY);
   });
 
+  it('keeps only the latest maxCalls requests', async () => {
+    const mock = await start({ maxCalls: 2 });
+    for (const content of ['one', 'two', 'three']) {
+      await (await chat(mock, { ...BODY, messages: [{ role: 'user', content }] })).text();
+    }
+    const contents = mock.calls.map((call) => (call.body as typeof BODY).messages[0]?.content);
+    expect(contents).toEqual(['two', 'three']);
+  });
+
+  it('stores credential headers as a hash prefix, except the public dev key', async () => {
+    const mock = await start({ apiKey: null });
+    await (await chat(mock)).text();
+    await (
+      await chat(mock, BODY, { Authorization: 'Bearer sk-live-secret', 'X-Api-Key': 'sk-other' })
+    ).text();
+    const [dev, secret] = mock.calls;
+    expect(dev?.headers.authorization).toBe('Bearer mock-key');
+    expect(secret?.headers.authorization).toMatch(/^Bearer \[redacted sha256:[0-9a-f]{12}\]$/);
+    expect(secret?.headers['x-api-key']).toMatch(/^\[redacted sha256:[0-9a-f]{12}\]$/);
+    expect(JSON.stringify(mock.calls)).not.toMatch(/sk-live-secret|sk-other/);
+  });
+
   it('rejects missing or wrong bearer keys with 401', async () => {
     const mock = await start();
     const missing = await fetch(`${mock.url}/v1/chat/completions`, {

@@ -21,6 +21,7 @@ export interface ApiKeyContext {
 }
 
 const requestIds = new WeakMap<object, string>();
+const clientRequestIds = new WeakMap<object, string>();
 const users = new WeakMap<object, AuthUser>();
 const apiKeys = new WeakMap<object, ApiKeyContext>();
 
@@ -28,8 +29,23 @@ export function setRequestId(req: object, id: string): void {
   requestIds.set(req, id);
 }
 
+/** Server-generated id, unique per request: the key for ledger and request rows (GW-07). */
 export function getRequestId(req: object): string | undefined {
   return requestIds.get(req);
+}
+
+export function setClientRequestId(req: object, id: string): void {
+  clientRequestIds.set(req, id);
+}
+
+/** The client's validated `X-Request-Id`; a correlation value only, never unique. */
+export function getClientRequestId(req: object): string | undefined {
+  return clientRequestIds.get(req);
+}
+
+/** The id the client sees in `X-Request-Id` and error envelopes: theirs, else the server's. */
+export function getCorrelationId(req: object): string | undefined {
+  return clientRequestIds.get(req) ?? requestIds.get(req);
 }
 
 export function setAuthUser(req: object, user: AuthUser): void {

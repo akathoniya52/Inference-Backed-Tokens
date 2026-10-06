@@ -132,10 +132,16 @@ describe('estimateHoldMicro', () => {
 describe('applyDiscount (G16: floor)', () => {
   it('floors the discounted cost', () => {
     expect(applyDiscount(405n, 1000)).toBe(364n); // 364.5
-    expect(applyDiscount(1n, 1000)).toBe(0n); // 0.9
     expect(applyDiscount(10n, 1000)).toBe(9n);
     expect(applyDiscount(405n, 0)).toBe(405n);
     expect(applyDiscount(405n, 10_000)).toBe(0n);
+  });
+
+  it('never rounds a positive cost down to 0 under a partial discount (GW-10)', () => {
+    expect(applyDiscount(1n, 1000)).toBe(1n); // 0.9
+    expect(applyDiscount(1n, 9999)).toBe(1n);
+    expect(applyDiscount(0n, 1000)).toBe(0n);
+    expect(applyDiscount(1n, 10_000)).toBe(0n);
   });
 
   it('rejects out-of-range bps', () => {

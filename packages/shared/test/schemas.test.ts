@@ -12,6 +12,8 @@ import {
   ErrorEnvelopeSchema,
   JwtClaimsSchema,
   LaunchConfirmRequestSchema,
+  MAX_INT64,
+  MAX_U64,
   LaunchConfirmResponseSchema,
   ModelSchema,
   NonceRequestSchema,
@@ -23,10 +25,12 @@ import {
   TxSignatureSchema,
   UpdateModelRequestSchema,
   UsageQuerySchema,
+  UsdcInputSchema,
   VerifyRequestSchema,
   buildSignInMessage,
   effectiveMaxTokens,
   signInChainId,
+  usageRangeEndMs,
   type ChatCompletionRequest,
 } from '../src/index.js';
 
@@ -341,6 +345,40 @@ describe('platform requests', () => {
     expect(QuoteQuerySchema.safeParse({ side: 'buy', amount: '100000000' }).success).toBe(true);
     expect(QuoteQuerySchema.safeParse({ side: 'buy', amount: '0' }).success).toBe(false);
     expect(QuoteQuerySchema.safeParse({ side: 'buy', amount: '1.5' }).success).toBe(false);
+  });
+
+  it('a date-only `to` covers its whole day, so same-day ranges pass (API-11)', () => {
+    expect(
+      UsageQuerySchema.safeParse({ from: '2024-01-01T12:00:00Z', to: '2024-01-01' }).success,
+    ).toBe(true);
+    expect(UsageQuerySchema.safeParse({ from: '2024-01-01', to: '2024-01-01' }).success).toBe(true);
+    expect(
+      UsageQuerySchema.safeParse({ from: '2024-01-02T00:00:01Z', to: '2024-01-01' }).success,
+    ).toBe(false);
+    expect(
+      UsageQuerySchema.safeParse({ from: '2024-01-01T12:00:00Z', to: '2024-01-01T11:00:00Z' })
+        .success,
+    ).toBe(false);
+    expect(usageRangeEndMs('2024-01-01')).toBe(Date.parse('2024-01-02T00:00:00Z'));
+    expect(usageRangeEndMs('2024-01-01T05:00:00Z')).toBe(Date.parse('2024-01-01T05:00:00Z'));
+  });
+
+  it('USDC inputs and quote amounts are bounded to storable integers (API-08)', () => {
+    const maxUsdc = '9223372036854.775807'; // (2^63 − 1) micro
+    expect(UsdcInputSchema.safeParse(maxUsdc).success).toBe(true);
+    expect(UsdcInputSchema.safeParse('9223372036854.775808').success).toBe(false);
+    expect(UsdcInputSchema.safeParse('99999999999999').success).toBe(false);
+    expect(UsdcInputSchema.safeParse('9'.repeat(10_000)).success).toBe(false);
+    expect(UsdcInputSchema.safeParse('abc').success).toBe(false);
+    expect(
+      CreateApiKeyRequestSchema.safeParse({ name: 'x', dailyCapUsdc: '99999999999999' }).success,
+    ).toBe(false);
+    expect(MAX_INT64).toBe(9223372036854775807n);
+
+    const quote = (amount: string) => QuoteQuerySchema.safeParse({ side: 'sell', amount }).success;
+    expect(quote(MAX_U64.toString())).toBe(true);
+    expect(quote((MAX_U64 + 1n).toString())).toBe(false);
+    expect(quote('1'.repeat(10_000))).toBe(false);
   });
 
   it('splits must sum to 10000', () => {

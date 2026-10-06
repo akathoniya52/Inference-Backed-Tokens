@@ -1,6 +1,8 @@
+import { AppError } from '@ibt/shared';
 import {
   type Commitment,
   Connection,
+  Keypair,
   type ParsedTransactionWithMeta,
   type PublicKey,
   type Signer,
@@ -18,9 +20,11 @@ import {
   type DammPoolDto,
   deriveDammPool,
   depositQuote,
+  maxBeforeSlippage,
   quoteSwap,
   quoteSwapDetailed,
   readDammPool,
+  withSlippageUp,
 } from './damm.js';
 import {
   buildCurveBuyTx,
@@ -29,14 +33,22 @@ import {
   type PoolRef,
   quoteBuy,
   quoteCurveSwap,
+  readCurveVaults,
   readPool,
   verifyLaunch,
   type VerifyLaunchInput,
 } from './dbc.js';
 import { type DepositResult, parseDeposit } from './deposit.js';
+import { parseLiquidityFill, parseSwapFill, type SwapFill, type SwapFillAccounts } from './fill.js';
+import { readTokenMetadata, type TokenMetadata } from './metadata.js';
 import { createRpc, type Rpc } from './rpc.js';
-import { NATIVE_MINT } from './sdk.js';
-import { type AnyTransaction, sendAndConfirm } from './send.js';
+import { derivePositionAddress, derivePositionNftAccount, NATIVE_MINT } from './sdk.js';
+import {
+  type AnyTransaction,
+  type ExpiredSignatureState,
+  expiredSignatureStatus,
+  sendAndConfirm,
+} from './send.js';
 import { ataOf, usdcTransferIxs } from './spl.js';
 
 /** Called after signing and before sending, with the step name for `settlements.pendingTx` (G20). */
@@ -67,27 +79,47 @@ export interface AddAndLockInput {
   lamports: bigint;
   /** Upper bound of model tokens the keeper may pair with `lamports`. */
   maxTokens: bigint;
+  /**
+   * Room above the quoted amounts the add may take if the price moves (default 100).
+   * The quote is sized so the buffered maximums stay within `lamports` and `maxTokens`.
+   */
+  slippageBps?: number;
 }
 
 export interface AddAndLockResult extends PositionKeys {
   addSignature: string;
   lockSignature: string;
   liquidityDelta: bigint;
+  /** Lamports and tokens the add tx actually moved into the pool vaults. */
   lamportsUsed: bigint;
   tokensUsed: bigint;
 }
 
-export type SignatureState = 'landed' | 'failed' | 'unknown';
+/** Actual amounts of a landed curve buy, from its token balance deltas. */
+export interface CurveBuyResult extends TxResult {
+  /** Model tokens the keeper received. */
+  outAmount: bigint;
+  /** Lamports the curve took (≤ the requested amount on a partial fill); the rest stays in the wallet. */
+  lamportsSpent: bigint;
+}
+
+export interface DammSwapResult extends TxResult {
+  /** Output base units actually received. */
+  outAmount: bigint;
+  /** Input base units actually taken. */
+  amountIn: bigint;
+}
+
+/** Which swap a signature was, to read its actual amounts back (`swapFill`). */
+export type SwapFillRef =
+  | { venue: 'curve'; owner: PublicKey; pool: PublicKey }
+  | { venue: 'damm'; owner: PublicKey; mint: PublicKey; inputMint: PublicKey };
 
 /**
- * Final status of a tx whose blockhash expired: `absent` means the node's history covers
- * the tx's whole validity window and has no record of it; `unknown` means it cannot tell
- * (expiry not finalized yet, status not finalized, or history pruned), so never resend.
+ * `landed`/`failed`: seen at `confirmed` or `finalized`. `pending`: only `processed`, which a
+ * fork can still drop, so poll again. `unknown`: no status on this RPC.
  */
-export type ExpiredSignatureState = 'landed' | 'failed' | 'absent' | 'unknown';
-
-/** Blocks a blockhash stays valid for (web3.js `lastValidBlockHeight` = its height + 150). */
-export const BLOCKHASH_VALIDITY_BLOCKS = 150;
+export type SignatureState = 'landed' | 'failed' | 'pending' | 'unknown';
 
 export interface PoolQuoteInput {
   /** `buy` spends `amount` lamports; `sell` spends `amount` token base units. */
@@ -111,6 +143,8 @@ export interface ChainClient {
     expected: { treasuryAta: PublicKey; depositRef: string },
   ): Promise<DepositResult>;
   verifyLaunch(input: VerifyLaunchInput): Promise<{ pool: string }>;
+  /** The mint's Metaplex metadata (name/symbol/uri NUL-trimmed), or null when it has none. */
+  tokenMetadata(mint: PublicKey): Promise<TokenMetadata | null>;
   readPool(ref: PoolRef): Promise<DbcPoolDto | null>;
   readDammPool(mint: PublicKey): Promise<DammPoolDto | null>;
   tokenBalance(wallet: PublicKey, mint: PublicKey): Promise<bigint>;
@@ -127,14 +161,16 @@ export interface ChainClient {
     pool: PublicKey,
     lamports: bigint,
     opts?: SendOpts & { slippageBps?: number },
-  ): Promise<TxResult & { outAmount: bigint }>;
+  ): Promise<CurveBuyResult>;
   migrate(keeper: Signer, pool: PublicKey, opts?: SendOpts): Promise<TxResult>;
   dammSwap(
     keeper: Signer,
     mint: PublicKey,
     swap: { inputMint: PublicKey; amountIn: bigint; slippageBps?: number },
     opts?: SendOpts,
-  ): Promise<TxResult & { outAmount: bigint }>;
+  ): Promise<DammSwapResult>;
+  /** Actual amounts of a landed swap, e.g. one recovered from `pendingTx` without its result. */
+  swapFill(signature: string, ref: SwapFillRef): Promise<SwapFill>;
   addAndLock(
     keeper: Signer,
     mint: PublicKey,
@@ -233,6 +269,65 @@ export class RealChainClient implements ChainClient {
     return verifyLaunch(this.connection, input);
   }
 
+  tokenMetadata(mint: PublicKey): Promise<TokenMetadata | null> {
+    return readTokenMetadata(this.rpc.read, mint);
+  }
+
+  /** A landed tx at `confirmed`, retried (bounded) while the RPC does not serve it yet. */
+  private async landedTx(signature: string): Promise<ParsedTransactionWithMeta> {
+    try {
+      return await this.rpc.withRetry(async (conn) => {
+        const tx = await conn.getParsedTransaction(signature, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0,
+        });
+        if (!tx) throw new Error('transaction not visible at confirmed yet');
+        return tx;
+      });
+    } catch (err) {
+      throw new AppError('chain_send_failed', {
+        message: 'transaction landed but could not be read back',
+        details: { signature, landed: true },
+        cause: err,
+      });
+    }
+  }
+
+  private async fill(signature: string, accounts: SwapFillAccounts): Promise<SwapFill> {
+    const fill = parseSwapFill(await this.landedTx(signature), accounts);
+    if (!fill) {
+      throw new AppError('chain_send_failed', {
+        message: 'landed swap moved no tokens',
+        details: { signature, landed: true },
+      });
+    }
+    return fill;
+  }
+
+  private async swapAccounts(ref: SwapFillRef): Promise<SwapFillAccounts> {
+    if (ref.venue === 'curve') {
+      const vaults = await readCurveVaults(this.connection, ref.pool);
+      return {
+        owner: ref.owner,
+        inputVault: vaults.quoteVault,
+        outputVault: vaults.baseVault,
+        outputMint: vaults.baseMint,
+      };
+    }
+    const { state } = await this.dammPool(ref.mint);
+    const aIn = ref.inputMint.equals(state.tokenAMint);
+    return {
+      owner: ref.owner,
+      inputVault: aIn ? state.tokenAVault : state.tokenBVault,
+      outputVault: aIn ? state.tokenBVault : state.tokenAVault,
+      outputMint: aIn ? state.tokenBMint : state.tokenAMint,
+    };
+  }
+
+  async swapFill(signature: string, ref: SwapFillRef): Promise<SwapFill> {
+    return this.fill(signature, await this.swapAccounts(ref));
+  }
+
   readPool(ref: PoolRef): Promise<DbcPoolDto | null> {
     return readPool(this.connection, ref);
   }
@@ -300,21 +395,21 @@ export class RealChainClient implements ChainClient {
     pool: PublicKey,
     lamports: bigint,
     opts: SendOpts & { slippageBps?: number } = {},
-  ): Promise<TxResult & { outAmount: bigint }> {
-    let outAmount = 0n;
+  ): Promise<CurveBuyResult> {
+    const accounts = await this.swapAccounts({ venue: 'curve', owner: keeper.publicKey, pool });
     const { signature } = await this.send(
       'curveBuy',
       [keeper],
       {
         buildTx: async () => {
           const quote = await quoteBuy(this.connection, pool, lamports, opts.slippageBps ?? 100);
-          outAmount = quote.outAmount;
           return buildCurveBuyTx(this.connection, keeper.publicKey, pool, lamports, quote.minOut);
         },
       },
       opts,
     );
-    return { signature, outAmount };
+    const fill = await this.fill(signature, accounts);
+    return { signature, outAmount: fill.amountOut, lamportsSpent: fill.amountIn };
   }
 
   async migrate(keeper: Signer, pool: PublicKey, opts?: SendOpts): Promise<TxResult> {
@@ -331,23 +426,29 @@ export class RealChainClient implements ChainClient {
     mint: PublicKey,
     swap: { inputMint: PublicKey; amountIn: bigint; slippageBps?: number },
     opts?: SendOpts,
-  ): Promise<TxResult & { outAmount: bigint }> {
+  ): Promise<DammSwapResult> {
     const pool = await this.dammPool(mint);
-    let outAmount = 0n;
+    const accounts = await this.swapAccounts({
+      venue: 'damm',
+      owner: keeper.publicKey,
+      mint,
+      inputMint: swap.inputMint,
+    });
     const { signature } = await this.send(
       'dammSwap',
       [keeper],
       {
         buildTx: async () => {
-          const quote = await quoteSwap(this.connection, pool, {
+          const fresh = await readDammPool(this.connection, pool.address);
+          const current = fresh ?? pool;
+          const quote = await quoteSwap(this.connection, current, {
             inputMint: swap.inputMint,
             amountIn: swap.amountIn,
             slippageBps: swap.slippageBps ?? 100,
           });
-          outAmount = quote.outAmount;
           return buildSwap(this.connection, {
             payer: keeper.publicKey,
-            pool,
+            pool: current,
             inputMint: swap.inputMint,
             amountIn: swap.amountIn,
             minOut: quote.minOut,
@@ -356,7 +457,38 @@ export class RealChainClient implements ChainClient {
       },
       opts,
     );
-    return { signature, outAmount };
+    const fill = await this.fill(signature, accounts);
+    return { signature, outAmount: fill.amountOut, amountIn: fill.amountIn };
+  }
+
+  /**
+   * Sizes a deposit so `withSlippageUp` of both sides stays within `lamports`/`maxTokens`;
+   * the buffered amounts are the on-chain maximums (`tokenX AmountThreshold`).
+   */
+  private addQuote(pool: DammPool, input: AddAndLockInput) {
+    const bps = input.slippageBps ?? 100;
+    const solIsA = pool.state.tokenAMint.equals(NATIVE_MINT);
+    let quote = depositQuote(this.connection, pool, {
+      inAmount: maxBeforeSlippage(input.lamports, bps),
+      isTokenA: solIsA,
+    });
+    let lamports = quote.inAmount;
+    let tokens = quote.outAmount;
+    if (withSlippageUp(tokens, bps) > input.maxTokens) {
+      quote = depositQuote(this.connection, pool, {
+        inAmount: maxBeforeSlippage(input.maxTokens, bps),
+        isTokenA: !solIsA,
+      });
+      tokens = quote.inAmount;
+      lamports = quote.outAmount;
+    }
+    const maxLamports = withSlippageUp(lamports, bps);
+    const maxTokens = withSlippageUp(tokens, bps);
+    return {
+      liquidityDelta: quote.liquidityDelta,
+      maxAmountTokenA: solIsA ? maxLamports : maxTokens,
+      maxAmountTokenB: solIsA ? maxTokens : maxLamports,
+    };
   }
 
   async addAndLock(
@@ -365,63 +497,66 @@ export class RealChainClient implements ChainClient {
     input: AddAndLockInput,
     opts?: SendOpts,
   ): Promise<AddAndLockResult> {
-    const pool = await this.dammPool(mint);
-    const solIsA = pool.state.tokenAMint.equals(NATIVE_MINT);
-    let quote = depositQuote(this.connection, pool, { inAmount: input.lamports, isTokenA: solIsA });
-    let lamportsUsed = quote.inAmount;
-    let tokensUsed = quote.outAmount;
-    if (tokensUsed > input.maxTokens) {
-      quote = depositQuote(this.connection, pool, { inAmount: input.maxTokens, isTokenA: !solIsA });
-      tokensUsed = quote.inAmount;
-      lamportsUsed = quote.outAmount;
-    }
-    const amounts = {
-      liquidityDelta: quote.liquidityDelta,
-      maxAmountTokenA: solIsA ? lamportsUsed : tokensUsed,
-      maxAmountTokenB: solIsA ? tokensUsed : lamportsUsed,
-    };
-
-    let keys: PositionKeys;
-    let addSignature: string;
-    if (input.position) {
-      keys = input.position;
-      const tx = await buildAddLiquidity(this.connection, {
-        owner: keeper.publicKey,
-        pool,
-        ...keys,
-        ...amounts,
-      });
-      ({ signature: addSignature } = await this.send('addLiquidity', [keeper], { tx }, opts));
-    } else {
+    const initial = await this.dammPool(mint);
+    const solIsA = initial.state.tokenAMint.equals(NATIVE_MINT);
+    // Fixed across rebuilds: a rebuilt create cannot open a second position.
+    const nft = Keypair.generate();
+    const positionNft = input.position ? null : nft;
+    let liquidityDelta = 0n;
+    const buildTx = async () => {
+      const pool = (await readDammPool(this.connection, initial.address)) ?? initial;
+      const amounts = this.addQuote(pool, input);
+      liquidityDelta = amounts.liquidityDelta;
+      if (input.position) {
+        return buildAddLiquidity(this.connection, {
+          owner: keeper.publicKey,
+          pool,
+          ...input.position,
+          ...amounts,
+        });
+      }
       const created = await buildCreatePositionAndAdd(this.connection, {
         owner: keeper.publicKey,
         pool,
+        ...(positionNft ? { positionNft } : {}),
         ...amounts,
       });
-      keys = { position: created.position, positionNftAccount: created.positionNftAccount };
-      ({ signature: addSignature } = await this.send(
-        'addLiquidity',
-        [keeper],
-        { tx: created.transaction },
-        opts,
-        created.extraSigners,
-      ));
+      return created.transaction;
+    };
+
+    const keys: PositionKeys = input.position ?? {
+      position: derivePositionAddress(nft.publicKey),
+      positionNftAccount: derivePositionNftAccount(nft.publicKey),
+    };
+    const { signature: addSignature } = await this.send(
+      'addLiquidity',
+      [keeper],
+      { buildTx },
+      opts,
+      positionNft ? [positionNft] : [],
+    );
+    const added = parseLiquidityFill(await this.landedTx(addSignature), initial.state);
+    if (!added) {
+      throw new AppError('chain_send_failed', {
+        message: 'landed add-liquidity could not be read back',
+        details: { signature: addSignature, landed: true },
+      });
     }
 
     const lockTx = await buildPermanentLock(this.connection, {
       owner: keeper.publicKey,
-      pool,
+      pool: initial,
       ...keys,
-      unlockedLiquidity: quote.liquidityDelta,
+      unlockedLiquidity: liquidityDelta,
     });
     const { signature: lockSignature } = await this.send('lock', [keeper], { tx: lockTx }, opts);
     return {
       ...keys,
       addSignature,
       lockSignature,
-      liquidityDelta: quote.liquidityDelta,
-      lamportsUsed,
-      tokensUsed,
+      liquidityDelta,
+      lamportsUsed: solIsA ? added.amountA : added.amountB,
+      tokensUsed: solIsA ? added.amountB : added.amountA,
     };
   }
 
@@ -446,30 +581,16 @@ export class RealChainClient implements ChainClient {
     });
     const status = value[0];
     if (!status) return 'unknown';
+    const { confirmationStatus } = status;
+    if (confirmationStatus !== 'confirmed' && confirmationStatus !== 'finalized') return 'pending';
     return status.err === null ? 'landed' : 'failed';
   }
 
-  /**
-   * All three reads go to the primary so the ledger range and the status come from the
-   * same node. A tx valid until `lastValidBlockHeight` can only land in a slot above
-   * `lastValidBlockHeight - 150` (a slot is never below its block height), so a node
-   * whose ledger starts at or before that slot would have it if it landed.
-   */
-  async expiredSignatureStatus(
+  /** All reads go to the primary so the ledger range and the status come from the same node. */
+  expiredSignatureStatus(
     signature: string,
     lastValidBlockHeight: number,
   ): Promise<ExpiredSignatureState> {
-    const conn = this.rpc.primary;
-    if ((await conn.getBlockHeight('finalized')) <= lastValidBlockHeight) return 'unknown';
-    const { value } = await conn.getSignatureStatuses([signature], {
-      searchTransactionHistory: true,
-    });
-    const status = value[0];
-    if (status) {
-      if (status.confirmationStatus !== 'finalized') return 'unknown';
-      return status.err === null ? 'landed' : 'failed';
-    }
-    const firstSlot = await conn.getMinimumLedgerSlot();
-    return firstSlot <= lastValidBlockHeight - 2 * BLOCKHASH_VALIDITY_BLOCKS ? 'absent' : 'unknown';
+    return expiredSignatureStatus(this.rpc.primary, signature, lastValidBlockHeight);
   }
 }

@@ -26,15 +26,29 @@ const ImageUrlSchema = z.url({ protocol: /^https$/ });
  * An upstream base URL: http(s) with no credentials, query or fragment, so
  * `chatCompletionsUrl` can append a path and nothing rides along with it.
  */
-const UpstreamBaseUrlSchema = z.url({ protocol: /^https?$/ }).refine(
-  (value) => {
-    // Unparseable values already fail the url check above.
-    if (!URL.canParse(value)) return true;
-    const url = new URL(value);
-    return url.username === '' && url.password === '' && !/[?#]/.test(value);
-  },
-  { message: 'baseUrl must not contain credentials, a query or a fragment' },
-);
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+const UpstreamBaseUrlSchema = z
+  .url({ protocol: /^https?$/ })
+  .refine(
+    (value) => {
+      // Unparseable values already fail the url check above.
+      if (!URL.canParse(value)) return true;
+      const url = new URL(value);
+      return url.username === '' && url.password === '' && !/[?#]/.test(value);
+    },
+    { message: 'baseUrl must not contain credentials, a query or a fragment' },
+  )
+  .refine(
+    (value) => {
+      if (!URL.canParse(value)) return true;
+      const url = new URL(value);
+      // API-17: the provider key rides in the Authorization header, so plain http
+      // is only for a loopback upstream (local mock, tests).
+      return url.protocol === 'https:' || LOOPBACK_HOSTS.has(url.hostname);
+    },
+    { message: 'baseUrl must use https (http only for localhost)' },
+  );
 
 export const PricingSchema = z.object({
   inputPerMTokUsdc: UsdcAmountSchema,
